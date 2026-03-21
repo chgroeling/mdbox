@@ -122,6 +122,7 @@ Exclusively use the following technologies and libraries for implementation:
     * Internal logging is handled **only** via `structlog` and is disabled by default. It is only activated if an explicit debug flag is passed in the CLI.
     * User feedback (progress, generic outputs) is handled **only** via `rich` and is only activated if a verbose flag is passed. Never mix UI outputs with the internal logger.
 
+* **Line length** <= 100 chars (enforced by ruff)
 ## Architecture & Internal Mechanisms
 * **CLI Structure:** Use Click's group/command pattern to naturally separate `pack` and `unpack` into subcommands. This aligns with modern CLI UX, keeps help text organized, and makes adding future commands straightforward.
 * **Concurrency & Memory Management (OOM Protection):**
