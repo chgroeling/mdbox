@@ -168,6 +168,27 @@ Command: `quiver [--verbose/-v] [--debug] pack <input_file> -f <output.xml>`
 - `get_console(verbose)` — returns a `rich.Console()` (stdout) when verbose, or `Console(quiet=True)` otherwise.
 - Rich verbose console writes to **stdout** (not stderr) so `CliRunner` captures it in `result.output`.
 
+### structlog usage rules
+- Use `structlog.get_logger(__name__)` in all modules — **never** `logging.getLogger()`.
+- Pass context as keyword arguments: `logger.debug("msg", key=value)` — **never** use `extra={...}`.
+  - `extra={"name": ...}` crashes: `name` is a reserved `LogRecord` attribute (`KeyError`).
+- Processor chain for `PrintLoggerFactory` (debug-enabled path):
+  ```python
+  processors=[
+      structlog.processors.add_log_level,
+      structlog.processors.StackInfoRenderer(),
+      structlog.dev.ConsoleRenderer(),
+  ]
+  ```
+- **Do not use** `structlog.stdlib.add_log_level` or `structlog.stdlib.add_logger_name` with `PrintLoggerFactory` — they require `logging.LoggerFactory()` and crash with `AttributeError: 'PrintLogger' object has no attribute 'name'`.
+
+### Established log fields in `archive.py`
+| Call site | Fields |
+|---|---|
+| `QuiverFile.__init__` | `archive_name=`, `mode=` |
+| `QuiverFile.add` | `entry_path=`, `size=` |
+| `QuiverFile.close` | `archive_name=` |
+
 ## Architecture & Internal Mechanisms
 * **CLI Structure:** Use Click's group/command pattern to naturally separate `pack` and `unpack` into subcommands. This aligns with modern CLI UX, keeps help text organized, and makes adding future commands straightforward.
 * **Concurrency & Memory Management (OOM Protection):**
