@@ -16,15 +16,19 @@ quiver/
 ├── README.md                    # Project documentation
 │
 ├── src/quiver/                  # Main source code (src-layout)
-│   ├── __init__.py              # Package metadata (__version__)
+│   ├── __init__.py              # Package metadata + quiver.open() factory
+│   ├── archive.py               # QuiverFile, QuiverInfo, BinaryFileError, XML logic
 │   ├── cli.py                   # Click CLI entry point
+│   ├── logging.py               # configure_debug_logging(), get_console()
 │   └── utils/                   # Utility modules
 │       └── __init__.py
 │
 ├── tests/                       # Test suite
 │   ├── __init__.py
 │   ├── conftest.py              # Pytest fixtures and configuration
-│   └── test_cli.py              # CLI tests
+│   ├── test_cli.py              # CLI smoke tests
+│   ├── test_archive.py          # QuiverFile / QuiverInfo unit tests
+│   └── test_pack_cli.py         # pack subcommand integration tests
 │
 └── docs/                        # MkDocs documentation
     └── index.md                 # Documentation home page
@@ -123,6 +127,47 @@ Exclusively use the following technologies and libraries for implementation:
     * User feedback (progress, generic outputs) is handled **only** via `rich` and is only activated if a verbose flag is passed. Never mix UI outputs with the internal logger.
 
 * **Line length** <= 100 chars (enforced by ruff)
+## Python API
+
+The public API follows the `tarfile` pattern. Entry point: `quiver.open()` in `__init__.py`.
+
+### `QuiverFile` (`src/quiver/archive.py`)
+- Factory: `QuiverFile.open(name, mode)` or `quiver.open(name, mode)`
+- Modes: `'r'` (read), `'w'` (write), `'a'` (append)
+- Context manager: calls `close()` on `__exit__`
+- `add(name, arcname=None)` — validates UTF-8, normalizes path, stores entry
+- `close()` — sorts entries alphabetically, builds lxml XML tree, writes to disk
+- `getnames()` / `getmembers()` — return names / `QuiverInfo` objects (write mode only for now)
+- `extractall()` — scaffolded; raises `NotImplementedError`
+
+### `QuiverInfo` (`src/quiver/archive.py`)
+- `name: str` — normalized POSIX path
+- `size: int` — content size in bytes
+- `isfile() -> bool`, `isdir() -> bool`
+
+### Exceptions
+- `BinaryFileError(ValueError)` — raised when a file is not valid UTF-8
+
+### `quiver.open()` (`src/quiver/__init__.py`)
+- Top-level factory; delegates to `QuiverFile.open()`
+- Exports: `open`, `QuiverFile`, `QuiverInfo`, `BinaryFileError`, `__version__`
+
+## CLI
+
+Command: `quiver [--verbose/-v] [--debug] pack <input_file> -f <output.xml>`
+
+- `--verbose` / `-v`: enables `rich` UI output (progress messages)
+- `--debug`: enables `structlog` structured logging to stderr
+- Silent by default — zero output on success without flags
+- `--verbose` / `--debug` are group-level flags; pass them **before** the subcommand name
+- `unpack` subcommand is a stub (`NotImplementedError` equivalent)
+
+## Logging & UI (`src/quiver/logging.py`)
+
+- `configure_debug_logging(enabled)` — configures `structlog`; use `logging.CRITICAL` (50) as the minimum no-op level. **Do not use `logging.CRITICAL + 1`** — it is not a valid structlog filter level and raises `KeyError`.
+- `get_console(verbose)` — returns a `rich.Console()` (stdout) when verbose, or `Console(quiet=True)` otherwise.
+- Rich verbose console writes to **stdout** (not stderr) so `CliRunner` captures it in `result.output`.
+
 ## Architecture & Internal Mechanisms
 * **CLI Structure:** Use Click's group/command pattern to naturally separate `pack` and `unpack` into subcommands. This aligns with modern CLI UX, keeps help text organized, and makes adding future commands straightforward.
 * **Concurrency & Memory Management (OOM Protection):**
