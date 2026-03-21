@@ -113,3 +113,31 @@ def test_pack_help_shows_options(runner: CliRunner) -> None:
     result = runner.invoke(main, ["pack", "--help"])
     assert result.exit_code == 0
     assert "-f" in result.output or "--file" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Regression: --debug flag must not crash due to reserved LogRecord keys
+# ---------------------------------------------------------------------------
+
+
+def test_pack_debug_flag_does_not_crash(fake_fs: FakeFilesystem, runner: CliRunner) -> None:
+    """Regression: structlog debug calls must not crash and must emit bound fields."""
+    fake_fs.create_file("input.txt", contents="data")
+    result = runner.invoke(main, ["--debug", "pack", "input.txt", "-f", "out.xml"])
+    assert result.exit_code == 0, result.output
+    assert fake_fs.get_object("out.xml") is not None
+    # Structlog ConsoleRenderer emits key=value pairs; verify bound fields appear.
+    assert "archive_name" in result.output
+    assert "entry_path" in result.output
+
+
+def test_pack_verbose_and_debug_flags(fake_fs: FakeFilesystem, runner: CliRunner) -> None:
+    """Regression: combining --verbose and --debug must succeed and show all output."""
+    fake_fs.create_file("input.txt", contents="data")
+    result = runner.invoke(main, ["--verbose", "--debug", "pack", "input.txt", "-f", "out.xml"])
+    assert result.exit_code == 0, result.output
+    # Rich verbose output present
+    assert len(result.output) > 0
+    # Structlog bound fields present
+    assert "archive_name" in result.output
+    assert "entry_path" in result.output

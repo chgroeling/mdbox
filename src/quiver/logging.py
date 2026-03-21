@@ -34,8 +34,8 @@ def configure_debug_logging(enabled: bool) -> None:
         structlog.configure(
             wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
             processors=[
-                structlog.stdlib.add_log_level,
-                structlog.stdlib.add_logger_name,
+                structlog.processors.add_log_level,
+                structlog.processors.StackInfoRenderer(),
                 structlog.dev.ConsoleRenderer(),
             ],
             logger_factory=structlog.PrintLoggerFactory(),

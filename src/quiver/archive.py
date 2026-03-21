@@ -6,16 +6,16 @@ into the quiver XML archive format.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+import structlog
 from lxml import etree
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 VALID_MODES = frozenset({"r", "w", "a"})
 ARCHIVE_VERSION = "1.0"
@@ -77,7 +77,7 @@ class QuiverFile:
         # Ordered list of (QuiverInfo, content_str) tuples accumulated during write/append.
         self._entries: list[tuple[QuiverInfo, str]] = []
         self._closed = False
-        logger.debug("QuiverFile opened", extra={"name": name, "mode": mode})
+        logger.debug("QuiverFile opened", archive_name=name, mode=mode)
 
     # ------------------------------------------------------------------
     # Factory
@@ -152,7 +152,7 @@ class QuiverFile:
         stored_path = arcname if arcname is not None else _normalize_path(file_path)
         info = QuiverInfo(name=stored_path, size=len(content.encode("utf-8")))
         self._entries.append((info, content))
-        logger.debug("Added file", extra={"path": stored_path, "size": info.size})
+        logger.debug("Added file", entry_path=stored_path, size=info.size)
 
     # ------------------------------------------------------------------
     # Read API (scaffolded — read mode not yet implemented)
@@ -211,7 +211,7 @@ class QuiverFile:
 
         if self._mode in {"w", "a"}:
             _write_archive(self._name, self._entries)
-            logger.debug("Archive written", extra={"name": self._name})
+            logger.debug("Archive written", archive_name=self._name)
 
 
 # ------------------------------------------------------------------
