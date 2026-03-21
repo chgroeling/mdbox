@@ -57,6 +57,15 @@ quiver/
 * **Initialize Environment:** `uv init` - Sets up a new project environment.
 * **Check Dependencies:** `uv check` - Validates compatibility of dependencies.
 
+
+### Versioning Rules
+Strict rules apply to version control in this project:
+* **Semantic Versioning (SemVer):** All versioning must strictly follow the SemVer standard (`MAJOR.MINOR.PATCH`).
+
+### Git Rules
+* **Conventional Commits:** All commit messages must adhere to the Conventional Commits standard (e.g., `feat: ...`, `fix: ...`, `chore: ...`, `refactor: ...`).
+* **Commits Only on Request:** **Never** commit code autonomously. Commits must only be executed when the user explicitly requests them.
+
 ### Best Practices for UV
 * Use `uv lock` regularly to maintain dependency integrity.
 * Avoid editing `uv.lock` manually; prefer using commands for consistency.
@@ -91,12 +100,6 @@ uv run pytest                      # Run tests
 * Use `pyfakefs` fixture (`fake_fs`) for filesystem mocking
 * Each module should have corresponding test file (e.g., `cli.py` → `test_cli.py`)
 * Aim for high test coverage, especially for critical paths
-
-## Workflow & Git Rules
-Strict rules apply to version control and the development workflow in this project:
-* **Semantic Versioning (SemVer):** All versioning must strictly follow the SemVer standard (`MAJOR.MINOR.PATCH`).
-* **Conventional Commits:** All commit messages must adhere to the Conventional Commits standard (e.g., `feat: ...`, `fix: ...`, `chore: ...`, `refactor: ...`).
-* **Commits Only on Request:** **Never** commit code autonomously. Commits must only be executed when the user explicitly requests them.
 
 ## Technology Stack
 Exclusively use the following technologies and libraries for implementation:
