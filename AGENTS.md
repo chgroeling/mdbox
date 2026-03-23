@@ -28,7 +28,7 @@ quiver/
 │   ├── conftest.py              # Pytest fixtures and configuration
 │   ├── test_cli.py              # CLI smoke tests
 │   ├── test_archive.py          # QuiverFile / QuiverInfo unit tests
-│   └── test_pack_cli.py         # pack subcommand integration tests
+│   └── test_create_cli.py       # create operation integration tests
 │
 └── docs/                        # MkDocs documentation
     └── index.md                 # Documentation home page
@@ -71,7 +71,9 @@ Run sequence: `uv run ruff format src/ tests/ && uv run ruff check src/ tests/ &
 
 ### Structure
 - **Location:** `tests/` directory.
-- **Mapping:** 1:1 module-to-test file ratio (e.g., `cli.py` -> `test_cli.py`).
+- **Mapping:** 1:1 module-to-test file ratio.
+    - `cli.py` -> `test_cli.py` (smoke) and `test_create_cli.py` (integration).
+    - `archive.py` -> `test_archive.py`.
 - **Practices:** Use `tmp_path` for FS tests; prioritize critical path coverage.
 
 
@@ -130,26 +132,23 @@ Command style mirrors `tar`:
 - **Extract stub**: `quiver -xf <archive.xml>` prints "not yet implemented".
 - Inputs after the archive path are packed recursively; multiple paths are allowed.
 - Silent by default—no stdout unless `-v` or `--debug` is supplied.
+- **Validation**: Mode flags (`-c`, `-x`) are mutually exclusive; exactly one is required.
 
 ## Logging & UI (`src/quiver/logging.py`)
+- `configure_debug_logging(enabled)`: Configures `structlog`. Use `logging.CRITICAL` (50) for no-op. **Avoid `logging.CRITICAL + 1`** (causes `KeyError`).
+- `get_console(verbose)`: Returns `rich.Console()`. Verbose writes to **stdout** for `CliRunner` capture; otherwise `quiet=True`.
 
-- `configure_debug_logging(enabled)` — configures `structlog`; use `logging.CRITICAL` (50) as the minimum no-op level. **Do not use `logging.CRITICAL + 1`** — it is not a valid structlog filter level and raises `KeyError`.
-- `get_console(verbose)` — returns a `rich.Console()` (stdout) when verbose, or `Console(quiet=True)` otherwise.
-- Rich verbose console writes to **stdout** (not stderr) so `CliRunner` captures it in `result.output`.
-
-### structlog usage rules
-- Use `structlog.get_logger(__name__)` in all modules — **never** `logging.getLogger()`.
-- Pass context as keyword arguments: `logger.debug("msg", key=value)` — **never** use `extra={...}`.
-  - `extra={"name": ...}` crashes: `name` is a reserved `LogRecord` attribute (`KeyError`).
-- Processor chain for `PrintLoggerFactory` (debug-enabled path):
+### structlog Rules
+- **Init**: Use `structlog.get_logger(__name__)`. **Never** `logging.getLogger()`.
+- **Context**: Use kwargs: `logger.debug("msg", k=v)`. **Never** `extra={...}` (crashes on reserved keys like `name`).
+- **Processors (PrintLoggerFactory)**:
   ```python
   processors=[
       structlog.processors.add_log_level,
       structlog.processors.StackInfoRenderer(),
       structlog.dev.ConsoleRenderer(),
   ]
-  ```
-- **Do not use** `structlog.stdlib.add_log_level` or `structlog.stdlib.add_logger_name` with `PrintLoggerFactory` — they require `logging.LoggerFactory()` and crash with `AttributeError: 'PrintLogger' object has no attribute 'name'`.
+
 
 ### Established log fields in `archive.py`
 | Call site | Fields |
@@ -158,19 +157,13 @@ Command style mirrors `tar`:
 | `QuiverFile.add` | `entry_path=`, `size=` |
 | `QuiverFile.close` | `archive_name=` |
 
-## Architecture & Internal Mechanisms
-- **CLI Structure:** A single Click command emulates tar-style flags, including bundled short options (`-cvf`). Custom argument preprocessing expands bundles before Click parses them.
-- **Concurrency & Memory Management (OOM Protection):**
-    * I/O operations are handled asynchronously (`asyncio`) or via threading.
-    * Implement a strict Reader/Writer pattern using a size-limited queue to prevent Out-of-Memory (OOM) crashes (backpressure).
-    * Large files must be streamed in chunks.
-- **Single Writer Principle:** To prevent deadlocks and ensure Git-friendly, deterministic results, only one dedicated task is permitted to write the prepared XML data.
-- **Sorting & Paths:** File entries must be written to the XML in strict alphabetical order. All internal paths must be normalized to POSIX paths (forward slashes `/`).
-- **Security & Validation:**
-    * Only UTF-8 readable text files may be processed.
-    * Unpacking requires strict sandboxing. Absolute paths or path-traversal attempts (`../`) must be blocked immediately and cause an abort.
-- **XML Constraints:** The content of text files must be placed within unescaped `<![CDATA[ ... ]]>` blocks in the XML. Do not use entity encoding (`&lt;`) for the file body.
-
+# Architecture & Mechanisms
+- **CLI:** Single Click command; emulates tar-style bundled short flags (`-cvf`) via custom pre-processing expansion.
+- **Concurrency/OOM:** Asyncio/threading with size-limited queues (Reader/Writer pattern) for backpressure; chunk-stream large files to prevent OOM.
+- **Single Writer:** One dedicated task handles XML output for determinism, Git-friendliness, and deadlock prevention.
+- **Normalization:** POSIX paths (forward slashes) only; file entries sorted alphabetically in XML.
+- **Security:** UTF-8 text only; sandbox unpacking; abort on absolute paths or traversal (`../`) attempts.
+- **XML Specs:** File content must use unescaped `<![CDATA[ ... ]]>` blocks; no entity encoding for bodies.
 
 ## Docstring Rules
 - **Format:** Google Style (`Args:`, `Returns:`, `Raises:`).
