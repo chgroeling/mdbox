@@ -14,6 +14,8 @@ import structlog
 from aiofile import async_open
 from lxml import etree
 
+from quiver.utils import build_directory_tree
+
 if TYPE_CHECKING:
     from types import TracebackType
 
@@ -379,7 +381,9 @@ def _normalize_path(path: Path) -> str:
 def _build_xml_tree(entries: list[tuple[QuiverInfo, str]]) -> etree._Element:
     """Build the lxml element tree for the archive.
 
-    Entries are sorted alphabetically by their stored POSIX path.
+    Entries are sorted alphabetically by their stored POSIX path. A
+    `<directory_tree>` element is inserted as the first child of `<archive>`,
+    containing a CDATA-wrapped visual tree of all packed paths.
 
     Args:
         entries: List of ``(QuiverInfo, content)`` pairs.
@@ -389,7 +393,14 @@ def _build_xml_tree(entries: list[tuple[QuiverInfo, str]]) -> etree._Element:
     """
     root = etree.Element("archive", version=ARCHIVE_VERSION)
 
-    for info, content in sorted(entries, key=lambda e: e[0].name):
+    sorted_entries = sorted(entries, key=lambda e: e[0].name)
+    paths = [info.name for info, _ in sorted_entries]
+
+    tree_text = build_directory_tree(paths)
+    tree_elem = etree.SubElement(root, "directory_tree")
+    tree_elem.text = etree.CDATA("\n" + tree_text + "\n")
+
+    for info, content in sorted_entries:
         file_elem = etree.SubElement(root, "file", path=info.name)
         content_elem = etree.SubElement(file_elem, "content")
         content_elem.text = etree.CDATA(content)

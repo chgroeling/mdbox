@@ -303,3 +303,94 @@ def test_normalize_path_strips_leading_slash() -> None:
 def test_normalize_path_simple_filename() -> None:
     result = _normalize_path(Path("simple.txt"))
     assert result == "simple.txt"
+
+
+# ---------------------------------------------------------------------------
+# directory_tree — integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_xml_contains_directory_tree_element(tmp_path: Path) -> None:
+    """The XML output must contain a <directory_tree> element."""
+    project = tmp_path / "project"
+    src = project / "src"
+    src.mkdir(parents=True)
+    (src / "main.py").write_text("print('hi')", encoding="utf-8")
+    archive_path = tmp_path / "archive.xml"
+
+    with QuiverFile.open(str(archive_path), mode="w") as qf:
+        qf.add(str(project))
+
+    root = etree.fromstring(archive_path.read_text(encoding="utf-8").encode())
+    tree_elem = root.find("directory_tree")
+    assert tree_elem is not None
+    assert tree_elem.text is not None
+    assert "main.py" in tree_elem.text
+
+
+def test_directory_tree_precedes_file_elements(tmp_path: Path) -> None:
+    """<directory_tree> must be the first child of <archive>, before all <file> elements."""
+    f = tmp_path / "a.txt"
+    f.write_text("hello", encoding="utf-8")
+    archive_path = tmp_path / "archive.xml"
+
+    with QuiverFile.open(str(archive_path), mode="w") as qf:
+        qf.add(str(f))
+
+    root = etree.fromstring(archive_path.read_text(encoding="utf-8").encode())
+    assert root[0].tag == "directory_tree"
+    for child in root[1:]:
+        assert child.tag == "file"
+
+
+def test_directory_tree_deep_nesting_integration(tmp_path: Path) -> None:
+    """Tree text in XML accurately reflects deeply nested directory structures."""
+    project = tmp_path / "project"
+    deep = project / "x" / "y" / "z"
+    deep.mkdir(parents=True)
+    (project / "top.txt").write_text("t", encoding="utf-8")
+    (project / "x" / "y" / "other.txt").write_text("o", encoding="utf-8")
+    (deep / "deep.txt").write_text("d", encoding="utf-8")
+    archive_path = tmp_path / "archive.xml"
+
+    with QuiverFile.open(str(archive_path), mode="w") as qf:
+        qf.add(str(project))
+
+    root = etree.fromstring(archive_path.read_text(encoding="utf-8").encode())
+    tree_text = root.find("directory_tree").text  # type: ignore[union-attr]
+    assert "x/" in tree_text
+    assert "y/" in tree_text
+    assert "z/" in tree_text
+    assert "deep.txt" in tree_text
+    assert "top.txt" in tree_text
+    # Verify multi-level indentation is present
+    assert "    " in tree_text
+
+
+def test_directory_tree_uses_cdata(tmp_path: Path) -> None:
+    """The <directory_tree> element must be serialized with CDATA, not entity encoding."""
+    f = tmp_path / "file.txt"
+    f.write_text("content", encoding="utf-8")
+    archive_path = tmp_path / "archive.xml"
+
+    with QuiverFile.open(str(archive_path), mode="w") as qf:
+        qf.add(str(f))
+
+    raw_xml = archive_path.read_text(encoding="utf-8")
+    # The CDATA marker must appear before the first </directory_tree>
+    tree_close = raw_xml.index("</directory_tree>")
+    tree_open_cdata = raw_xml.index("<![CDATA[")
+    assert tree_open_cdata < tree_close
+
+
+def test_directory_tree_empty_archive() -> None:
+    """An archive with no files must still contain <directory_tree> with just '.'."""
+    # We need to exercise _build_xml_tree with empty entries; the easiest way
+    # is to call the internal helper directly.
+    from quiver.archive import _build_xml_tree
+
+    root = _build_xml_tree([])
+    tree_elem = root.find("directory_tree")
+    assert tree_elem is not None
+    assert tree_elem.text is not None
+    assert tree_elem.text.strip() == "."
