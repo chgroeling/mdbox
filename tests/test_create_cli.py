@@ -144,6 +144,22 @@ def test_create_binary_file_error(tmp_path: Path, runner: CliRunner) -> None:
     assert result.exit_code != 0
 
 
+def test_create_control_char_error_message(tmp_path: Path, runner: CliRunner) -> None:
+    """CLI error for XML-incompatible control chars must include path and location."""
+    bad = tmp_path / "ctrl.txt"
+    # Place \x07 at line 2, col 4.
+    bad.write_bytes(b"first\nsec\x07ond")
+    output_file = tmp_path / "out.xml"
+
+    result = runner.invoke(main, ["-c", "-f", str(output_file), str(bad)])
+
+    assert result.exit_code != 0
+    assert "ctrl.txt" in result.output
+    assert "line 2" in result.output
+    assert "col 4" in result.output
+    assert r"\x07" in result.output
+
+
 def test_create_directory_with_binary_file_errors(tmp_path: Path, runner: CliRunner) -> None:
     project = tmp_path / "project"
     project.mkdir()

@@ -16,6 +16,7 @@ Internal layer layout (top → bottom, no upward imports):
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -154,6 +155,46 @@ def _decode_utf8(raw: bytes, path: Path) -> str:
         ) from exc
 
 
+# XML 1.0 forbidden characters: everything except #x9 | #xA | #xD | [#x20-#xD7FF] |
+# [#xE000-#xFFFD] | [#x10000-#x10FFFF].  In practice this means NULL bytes and
+# the C0/C1 control characters that are not tab/LF/CR.
+_XML_FORBIDDEN_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]")
+_MAX_REPORTED_OFFENCES = 5
+
+
+def _validate_xml_compatible(content: str, path: Path) -> None:
+    """Raise `BinaryFileError` if *content* contains XML-1.0-forbidden characters.
+
+    Scans for NULL bytes and control characters that are legal UTF-8 but rejected
+    by lxml's CDATA serializer.  Reports up to `_MAX_REPORTED_OFFENCES` locations
+    (line number, column, hex value) so the caller can locate the offending bytes.
+
+    Args:
+        content: Decoded text to validate.
+        path: Source file path used in the error message.
+
+    Raises:
+        BinaryFileError: If any forbidden character is found, with a message that
+            includes the file path and the location of each offending character.
+    """
+    offences: list[str] = []
+    for match in _XML_FORBIDDEN_RE.finditer(content):
+        if len(offences) >= _MAX_REPORTED_OFFENCES:
+            break
+        pos = match.start()
+        line = content.count("\n", 0, pos) + 1
+        col = pos - content.rfind("\n", 0, pos)  # 1-based; rfind returns -1 before first \n
+        char = match.group()
+        offences.append(f"  line {line}, col {col}: \\x{ord(char):02x}")
+
+    if offences:
+        locations = "\n".join(offences)
+        raise BinaryFileError(
+            f"File {str(path)!r} contains XML-incompatible control characters "
+            f"and cannot be packed.\n{locations}"
+        )
+
+
 def _read_text_file(path: Path) -> str:
     """Read *path* as UTF-8 text.
 
@@ -164,20 +205,26 @@ def _read_text_file(path: Path) -> str:
         The file content as a string.
 
     Raises:
-        BinaryFileError: If the file cannot be decoded as UTF-8.
+        BinaryFileError: If the file cannot be decoded as UTF-8 or contains
+            XML-incompatible control characters.
     """
-    return _decode_utf8(path.read_bytes(), path)
+    content = _decode_utf8(path.read_bytes(), path)
+    _validate_xml_compatible(content, path)
+    return content
 
 
 async def _read_text_file_async(path: Path) -> str:
     """Asynchronously read *path* as UTF-8 text.
 
     Raises:
-        BinaryFileError: If the file cannot be decoded as UTF-8.
+        BinaryFileError: If the file cannot be decoded as UTF-8 or contains
+            XML-incompatible control characters.
     """
     async with async_open(path, "rb") as afp:
         raw = cast("bytes", await afp.read())
-    return _decode_utf8(raw, path)
+    content = _decode_utf8(raw, path)
+    _validate_xml_compatible(content, path)
+    return content
 
 
 def _collect_directory_files(directory_path: Path) -> list[Path]:

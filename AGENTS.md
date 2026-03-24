@@ -109,7 +109,7 @@ The public API follows the `tarfile` pattern. Entry point: `quiver.open()` in `_
 - Factory: `QuiverFile.open(name, mode)` or `quiver.open(name, mode)`
 - Modes: `'r'` (read), `'w'` (write), `'a'` (append)
 - Context manager: calls `close()` on `__exit__`
-- `add(name, arcname=None)` — accepts file or directory input; validates UTF-8, normalizes POSIX paths, stores entries
+- `add(name, arcname=None)` — accepts file or directory input; validates UTF-8 encoding **and** XML-1.0 character compatibility (via `_validate_xml_compatible`), normalizes POSIX paths, stores entries
 - Directory packing uses an internal async reader/writer flow with bounded queue backpressure and a single writer task
 - `close()` — sorts entries alphabetically, builds lxml XML tree, writes to disk
 - `getnames()` / `getmembers()` — return names / `QuiverInfo` objects; works in both read and write mode
@@ -121,7 +121,7 @@ The public API follows the `tarfile` pattern. Entry point: `quiver.open()` in `_
 - `isfile() -> bool`, `isdir() -> bool`
 
 ### Exceptions
-- `BinaryFileError(ValueError)` — raised when a file is not valid UTF-8
+- `BinaryFileError(ValueError)` — raised when a file (a) is not valid UTF-8, **or** (b) is valid UTF-8 but contains XML-1.0-forbidden characters (NULL bytes, C0/C1 control characters other than tab/LF/CR). The error message always includes the file path and, for case (b), up to `_MAX_REPORTED_OFFENCES` (default 5) locations formatted as `line N, col M: \xNN`.
 - `PathTraversalError(ValueError)` — raised when an archive entry path is absolute, contains `..`, or resolves outside the extraction destination
 
 ### `quiver.open()` (`src/quiver/__init__.py`)
@@ -169,6 +169,9 @@ Command style mirrors `tar`:
 - **Single Writer:** One dedicated task handles XML output for determinism, Git-friendliness, and deadlock prevention.
 - **Normalization:** POSIX paths (forward slashes) only; file entries sorted alphabetically in XML.
 - **Security:** UTF-8 text only; sandbox unpacking; abort on absolute paths or traversal (`../`) attempts. `_validate_extraction_path()` (Layer 1) performs pre-resolution rejection of absolute paths and `..` components, then confirms the resolved path is inside the destination with `Path.relative_to()`.
+- **Content validation (Layer 2):** File content goes through two sequential checks inside `_read_text_file()` / `_read_text_file_async()` before it is stored:
+  1. `_decode_utf8()` — rejects non-UTF-8 bytes → `BinaryFileError`.
+  2. `_validate_xml_compatible()` — rejects XML-1.0-forbidden characters (matched by `_XML_FORBIDDEN_RE`: `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]`) → `BinaryFileError` with line/col/hex location info (up to `_MAX_REPORTED_OFFENCES = 5` occurrences). This prevents a late crash inside `lxml.etree.CDATA()` at serialization time with no useful context.
 - **Extraction Pipeline (`_ExtractPipeline`, Layer 3.5):** Mirrors `_PackPipeline`. Feeds `(stored_path, content)` pairs through a bounded `asyncio.Queue`; concurrent worker tasks validate, create parent dirs via `asyncio.to_thread`, and write files with `aiofile`. XML parsing uses `lxml.iterparse` to avoid loading the whole document into memory.
 - **Read mode (`QuiverFile.__init__`):** Opening in `'r'` immediately parses the archive via `_parse_archive()` and populates `self._entries`; raises `FileNotFoundError` if the file does not exist.
 - **XML Specs:** File content must use unescaped `<![CDATA[ ... ]]>` blocks; no entity encoding for bodies.

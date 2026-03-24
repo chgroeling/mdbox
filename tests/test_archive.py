@@ -165,6 +165,108 @@ def test_add_binary_file_raises(tmp_path: Path) -> None:
         qf.add(str(binary))
 
 
+# ---------------------------------------------------------------------------
+# XML-incompatible control character validation
+# ---------------------------------------------------------------------------
+
+
+def test_add_file_with_null_byte_raises(tmp_path: Path) -> None:
+    """A UTF-8 file containing a NULL byte must raise BinaryFileError at add() time."""
+    bad = tmp_path / "null.txt"
+    bad.write_bytes(b"hello\x00world")
+    archive_path = tmp_path / "archive.xml"
+
+    with (
+        QuiverFile.open(str(archive_path), mode="w") as qf,
+        pytest.raises(BinaryFileError, match=r"\\x00"),
+    ):
+        qf.add(str(bad))
+
+
+def test_add_file_with_control_char_raises(tmp_path: Path) -> None:
+    """A UTF-8 file containing a C0 control character must raise BinaryFileError."""
+    bad = tmp_path / "ctrl.txt"
+    bad.write_bytes(b"line one\nline two\x07bell")
+    archive_path = tmp_path / "archive.xml"
+
+    with (
+        QuiverFile.open(str(archive_path), mode="w") as qf,
+        pytest.raises(BinaryFileError, match=r"\\x07"),
+    ):
+        qf.add(str(bad))
+
+
+def test_xml_control_char_error_contains_file_path(tmp_path: Path) -> None:
+    """BinaryFileError message must include the offending file's path."""
+    bad = tmp_path / "offender.txt"
+    bad.write_bytes(b"bad\x01byte")
+    archive_path = tmp_path / "archive.xml"
+
+    with (
+        QuiverFile.open(str(archive_path), mode="w") as qf,
+        pytest.raises(BinaryFileError) as exc_info,
+    ):
+        qf.add(str(bad))
+
+    assert "offender.txt" in str(exc_info.value)
+
+
+def test_xml_control_char_error_contains_line_and_col(tmp_path: Path) -> None:
+    """BinaryFileError message must include a line number and column for the bad char."""
+    # Place the bad character on line 2, column 4 (1-based).
+    bad = tmp_path / "located.txt"
+    bad.write_bytes(b"first\nsec\x1fond")
+    archive_path = tmp_path / "archive.xml"
+
+    with (
+        QuiverFile.open(str(archive_path), mode="w") as qf,
+        pytest.raises(BinaryFileError) as exc_info,
+    ):
+        qf.add(str(bad))
+
+    msg = str(exc_info.value)
+    assert "line 2" in msg
+    assert "col 4" in msg
+    assert r"\x1f" in msg
+
+
+def test_xml_control_char_error_multiple_occurrences(tmp_path: Path) -> None:
+    """BinaryFileError message reports up to _MAX_REPORTED_OFFENCES locations."""
+    from quiver.archive import _MAX_REPORTED_OFFENCES
+
+    bad = tmp_path / "many.txt"
+    # 10 forbidden chars — only the first _MAX_REPORTED_OFFENCES should appear.
+    bad.write_bytes(b"\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c")
+    archive_path = tmp_path / "archive.xml"
+
+    with (
+        QuiverFile.open(str(archive_path), mode="w") as qf,
+        pytest.raises(BinaryFileError) as exc_info,
+    ):
+        qf.add(str(bad))
+
+    msg = str(exc_info.value)
+    # Should have at most _MAX_REPORTED_OFFENCES "line N, col M" entries.
+    reported = msg.count("line ")
+    assert reported == _MAX_REPORTED_OFFENCES
+
+
+def test_add_directory_with_control_char_file_raises(tmp_path: Path) -> None:
+    """async pipeline: a control-char file inside a packed directory raises BinaryFileError."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "ok.txt").write_text("clean", encoding="utf-8")
+    bad = project / "ctrl.txt"
+    bad.write_bytes(b"text\x0bvt")
+    archive_path = tmp_path / "archive.xml"
+
+    with (
+        QuiverFile.open(str(archive_path), mode="w") as qf,
+        pytest.raises(BinaryFileError, match=r"\\x0b"),
+    ):
+        qf.add(str(project))
+
+
 def test_add_directory_recursively_packs_files(tmp_path: Path) -> None:
     project = tmp_path / "project"
     src = project / "src"
