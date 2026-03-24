@@ -29,6 +29,7 @@ quiver/
 │   ├── test_cli.py              # CLI smoke tests
 │   ├── test_archive.py          # QuiverFile / QuiverInfo unit tests
 │   ├── test_create_cli.py       # create operation integration tests
+│   ├── test_extract_cli.py      # extract operation integration tests
 │   └── test_utils.py            # utils/__init__.py unit tests
 │
 └── docs/                        # MkDocs documentation
@@ -73,7 +74,7 @@ Run sequence: `uv run ruff format src/ tests/ && uv run ruff check src/ tests/ &
 ### Structure
 - **Location:** `tests/` directory.
 - **Mapping:** 1:1 module-to-test file ratio.
-    - `cli.py` -> `test_cli.py` (smoke) and `test_create_cli.py` (integration).
+    - `cli.py` -> `test_cli.py` (smoke), `test_create_cli.py` (create integration), `test_extract_cli.py` (extract integration).
     - `archive.py` -> `test_archive.py`.
     - `utils/__init__.py` -> `test_utils.py`.
 - **Practices:** Use `tmp_path` for FS tests; prioritize critical path coverage.
@@ -111,8 +112,8 @@ The public API follows the `tarfile` pattern. Entry point: `quiver.open()` in `_
 - `add(name, arcname=None)` — accepts file or directory input; validates UTF-8, normalizes POSIX paths, stores entries
 - Directory packing uses an internal async reader/writer flow with bounded queue backpressure and a single writer task
 - `close()` — sorts entries alphabetically, builds lxml XML tree, writes to disk
-- `getnames()` / `getmembers()` — return names / `QuiverInfo` objects (write mode only for now)
-- `extractall()` — scaffolded; raises `NotImplementedError`
+- `getnames()` / `getmembers()` — return names / `QuiverInfo` objects; works in both read and write mode
+- `extractall(path=".", members=None)` — extracts all (or selected) members to *path* using an async pipeline; validates every path against the destination sandbox before writing
 
 ### `QuiverInfo` (`src/quiver/archive.py`)
 - `name: str` — normalized POSIX path
@@ -121,19 +122,20 @@ The public API follows the `tarfile` pattern. Entry point: `quiver.open()` in `_
 
 ### Exceptions
 - `BinaryFileError(ValueError)` — raised when a file is not valid UTF-8
+- `PathTraversalError(ValueError)` — raised when an archive entry path is absolute, contains `..`, or resolves outside the extraction destination
 
 ### `quiver.open()` (`src/quiver/__init__.py`)
 - Top-level factory; delegates to `QuiverFile.open()`
-- Exports: `open`, `QuiverFile`, `QuiverInfo`, `BinaryFileError`, `__version__`
+- Exports: `open`, `QuiverFile`, `QuiverInfo`, `BinaryFileError`, `PathTraversalError`, `__version__`
 
 ## CLI
 Command style mirrors `tar`:
 
 - **Create**: `quiver -cf <archive.xml> <input_path...>` bundles short flags; `-f` must be last in a bundle.
+- **Extract**: `quiver -xf <archive.xml> [destination]` extracts to `destination` (default: `.`).
 - **Verbose**: include `-v` (e.g., `quiver -cvf archive.xml src docs`).
 - **Debug logging**: `--debug` (no short form).
-- **Extract stub**: `quiver -xf <archive.xml>` prints "not yet implemented".
-- Inputs after the archive path are packed recursively; multiple paths are allowed.
+- Inputs after the archive path are packed recursively for `-c`; for `-x` the first positional arg is the destination.
 - Silent by default—no stdout unless `-v` or `--debug` is supplied.
 - **Validation**: Mode flags (`-c`, `-x`) are mutually exclusive; exactly one is required.
 
@@ -159,17 +161,20 @@ Command style mirrors `tar`:
 | `QuiverFile.__init__` | `archive_name=`, `mode=` |
 | `QuiverFile.add` | `entry_path=`, `size=` |
 | `QuiverFile.close` | `archive_name=` |
+| `_ExtractPipeline._writer_worker` | `entry_path=`, `size=` |
 
 # Architecture & Mechanisms
 - **CLI:** Single Click command; emulates tar-style bundled short flags (`-cvf`) via custom pre-processing expansion.
 - **Concurrency/OOM:** Asyncio/threading with size-limited queues (Reader/Writer pattern) for backpressure; chunk-stream large files to prevent OOM.
 - **Single Writer:** One dedicated task handles XML output for determinism, Git-friendliness, and deadlock prevention.
 - **Normalization:** POSIX paths (forward slashes) only; file entries sorted alphabetically in XML.
-- **Security:** UTF-8 text only; sandbox unpacking; abort on absolute paths or traversal (`../`) attempts.
+- **Security:** UTF-8 text only; sandbox unpacking; abort on absolute paths or traversal (`../`) attempts. `_validate_extraction_path()` (Layer 1) performs pre-resolution rejection of absolute paths and `..` components, then confirms the resolved path is inside the destination with `Path.relative_to()`.
+- **Extraction Pipeline (`_ExtractPipeline`, Layer 3.5):** Mirrors `_PackPipeline`. Feeds `(stored_path, content)` pairs through a bounded `asyncio.Queue`; concurrent worker tasks validate, create parent dirs via `asyncio.to_thread`, and write files with `aiofile`. XML parsing uses `lxml.iterparse` to avoid loading the whole document into memory.
+- **Read mode (`QuiverFile.__init__`):** Opening in `'r'` immediately parses the archive via `_parse_archive()` and populates `self._entries`; raises `FileNotFoundError` if the file does not exist.
 - **XML Specs:** File content must use unescaped `<![CDATA[ ... ]]>` blocks; no entity encoding for bodies.
   - `<directory_tree>` is always the **first child** of `<archive>`, placed before all `<file>` elements.
   - `<directory_tree>` content is also CDATA-wrapped (`"\n" + tree_text + "\n"`) for consistency and to future-proof against special characters in filenames.
-  - An empty archive renders `<directory_tree>` containing just `"."`.
+  - An empty archive renders `<directory_tree>` containing just `"."`.)
 
 ## Docstring Rules
 - **Format:** Google Style (`Args:`, `Returns:`, `Raises:`).
@@ -179,3 +184,4 @@ Command style mirrors `tar`:
 - **Types:** Rely on Python type hints in the signature. Do not duplicate types in docstrings.
 - **Style:** PEP 257 imperative mood ("Return X", not "Returns X").
 - **Length:** Use pure one-liners (`"""Do X."""`) for simple, private, or trivial functions. Use multi-line (summary, blank line, sections) ONLY for complex or public APIs. Do not force `Args:`/`Returns:` if the function is self-explanatory.
+- **Staleness:** When implementing a previously scaffolded method (e.g., one that raised `NotImplementedError`), always update its docstring, any inline section comments, and the class-level `Supported modes:` block to reflect the new behaviour. Treat stale "not yet implemented" language anywhere in the codebase as a bug.
