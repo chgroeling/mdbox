@@ -7,6 +7,7 @@ from pathlib import Path
 import lxml.etree as etree
 from click.testing import CliRunner
 
+from quiver.archive import QuiverFile
 from quiver.cli import main
 
 # ---------------------------------------------------------------------------
@@ -367,15 +368,18 @@ def test_add_verbose_produces_output(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_add_missing_archive_errors(tmp_path: Path) -> None:
-    """Trying to add to a non-existent archive exits with code 1."""
+def test_add_missing_archive_creates_new(tmp_path: Path) -> None:
+    """Adding to a non-existent archive creates it from scratch."""
     new_file = tmp_path / "b.txt"
     new_file.write_text("B", encoding="utf-8")
+    archive = tmp_path / "no_such_archive.xml"
 
     runner = CliRunner()
-    result = runner.invoke(main, ["-af", str(tmp_path / "no_such_archive.xml"), str(new_file)])
-    assert result.exit_code == 1
-    assert "error" in result.output.lower()
+    result = runner.invoke(main, ["-af", str(archive), str(new_file)])
+    assert result.exit_code == 0
+    assert archive.exists()
+    with QuiverFile.open(str(archive), mode="r") as qf:
+        assert any(n.endswith("b.txt") for n in qf.getnames())
 
 
 def test_add_missing_input_file_errors(tmp_path: Path) -> None:

@@ -8,7 +8,8 @@ Internal layer layout (top → bottom, no upward imports):
     Layer 0 — Constants & Exceptions
     Layer 1 — Path Normalization   (pure, no I/O)
     Layer 2 — I/O                 (file reading, directory walking)
-    Layer 3 — Async Pack Pipeline (_PackPipeline)
+    Layer 3 — Async Pack Pipeline  (_PackPipeline)
+    Layer 3.5 — Async Extract Pipeline (_ExtractPipeline)
     Layer 4 — XML Serialization   (lxml, no asyncio)
     Layer 5 — Public API          (QuiverInfo, QuiverFile)
 """
@@ -16,8 +17,6 @@ Internal layer layout (top → bottom, no upward imports):
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import io
 import re
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
@@ -511,199 +510,6 @@ class _ExtractPipeline:
 
 
 # ===========================================================================
-# Layer 3.7 — Async Upsert (Stream & Merge) Pipeline
-# ===========================================================================
-
-
-class _UpsertPipeline:
-    """Stream-merge pipeline that upserts new entries into an existing archive.
-
-    Performs two sequential `lxml.iterparse` passes over the original archive's
-    XML block to stay OOM-safe regardless of archive size:
-
-    - **Pass 1** collects existing ``path`` attributes (freeing each element
-      immediately via ``element.clear()``) and regenerates the
-      ``<directory_tree>`` from the merged path set.
-    - **Pass 2** streams ``<file>`` elements in document order and
-      merge-inserts/upserts/copies them against the sorted list of new entries,
-      writing each resulting element to a ``.tmp`` file via `aiofile`.
-
-    On success the ``.tmp`` file atomically replaces the original archive via
-    ``os.replace``.  If any error occurs before that point the original file
-    is never touched.
-
-    Args:
-        archive_path: Path to the existing archive to update.
-        new_entries: Sorted list of ``(QuiverInfo, content)`` pairs to upsert.
-        preamble: Optional preamble override.  ``None`` keeps the original.
-        epilogue: Optional epilogue override.  ``None`` keeps the original.
-    """
-
-    def __init__(
-        self,
-        archive_path: str,
-        new_entries: list[tuple[QuiverInfo, str]],
-        preamble: str | None = None,
-        epilogue: str | None = None,
-    ) -> None:
-        self._archive_path = archive_path
-        self._new_entries = sorted(new_entries, key=lambda e: e[0].name)
-        self._preamble = preamble
-        self._epilogue = epilogue
-
-    def run(self) -> None:
-        """Execute the upsert pipeline synchronously."""
-        asyncio.run(self._run_async())
-
-    async def _run_async(self) -> None:
-        """Orchestrate the two-pass merge and atomic swap."""
-        raw = await asyncio.to_thread(Path(self._archive_path).read_text, encoding="utf-8")
-        orig_preamble, xml_content, orig_epilogue = _split_archive_text(raw)
-
-        # Caller-supplied values override what was in the file; otherwise
-        # preserve what was already there.
-        effective_preamble = self._preamble if self._preamble is not None else orig_preamble
-        effective_epilogue = self._epilogue if self._epilogue is not None else orig_epilogue
-
-        xml_bytes = xml_content.encode("utf-8")
-        new_entries_by_path = {info.name: content for info, content in self._new_entries}
-        new_paths_sorted = [info.name for info, _ in self._new_entries]
-
-        # ------------------------------------------------------------------
-        # Pass 1 — collect existing paths for directory tree regeneration
-        # ------------------------------------------------------------------
-        existing_paths: list[str] = []
-        for _event, elem in etree.iterparse(io.BytesIO(xml_bytes), events=("end",), tag="file"):
-            path_attr = elem.get("path", "")
-            if path_attr:
-                existing_paths.append(path_attr)
-            elem.clear()
-
-        # Build merged, deduplicated, sorted path list for the directory tree.
-        merged_paths = sorted(set(existing_paths) | set(new_paths_sorted))
-        tree_text = build_directory_tree(merged_paths)
-
-        # ------------------------------------------------------------------
-        # Pass 2 — stream-merge into .tmp file
-        # ------------------------------------------------------------------
-        tmp_path = self._archive_path + ".tmp"
-        try:
-            await self._write_merged(
-                tmp_path,
-                xml_bytes,
-                new_entries_by_path,
-                new_paths_sorted,
-                tree_text,
-                effective_preamble,
-                effective_epilogue,
-            )
-            await asyncio.to_thread(Path(tmp_path).replace, self._archive_path)
-            logger.debug("Archive upserted", archive_name=self._archive_path)
-        except Exception:
-            # Leave the original archive untouched; clean up the partial tmp.
-            with contextlib.suppress(FileNotFoundError):
-                await asyncio.to_thread(Path(tmp_path).unlink)
-            raise
-
-    async def _write_merged(
-        self,
-        tmp_path: str,
-        xml_bytes: bytes,
-        new_entries_by_path: dict[str, str],
-        new_paths_sorted: list[str],
-        tree_text: str,
-        preamble: str | None,
-        epilogue: str | None,
-    ) -> None:
-        """Write the merged archive to *tmp_path*."""
-        # Index into new_paths_sorted tracking which new entries are still
-        # pending insertion.
-        pending_idx = 0
-        pending_total = len(new_paths_sorted)
-
-        parts: list[str] = []
-
-        # Preamble + sentinel
-        if preamble:
-            parts.append(preamble)
-            parts.append(_PREAMBLE_SENTINEL)
-
-        # Opening tag + version attribute
-        parts.append(f'<archive version="{ARCHIVE_VERSION}">\n')
-
-        # Directory tree element (CDATA-wrapped, matches _build_xml_tree)
-        tree_elem = etree.Element("directory_tree")
-        tree_elem.text = etree.CDATA("\n" + tree_text + "\n")
-        parts.append(
-            "  "
-            + etree.tostring(tree_elem, encoding="unicode", xml_declaration=False).rstrip("\n")
-            + "\n"
-        )
-
-        # ------------------------------------------------------------------
-        # Stream existing <file> elements, merge-inserting new entries
-        # ------------------------------------------------------------------
-        for _event, elem in etree.iterparse(io.BytesIO(xml_bytes), events=("end",), tag="file"):
-            stored_path = elem.get("path", "")
-
-            # Insert new entries that sort before this existing entry.
-            while pending_idx < pending_total and new_paths_sorted[pending_idx] < stored_path:
-                new_path = new_paths_sorted[pending_idx]
-                parts.append(self._render_file_element(new_path, new_entries_by_path[new_path]))
-                pending_idx += 1
-
-            if stored_path in new_entries_by_path:
-                # Upsert: replace existing entry with the new content.
-                parts.append(
-                    self._render_file_element(stored_path, new_entries_by_path[stored_path])
-                )
-                # Consume this new entry so it is not appended again in the drain.
-                new_paths_sorted_set = set(new_paths_sorted[:pending_total])
-                if stored_path in new_paths_sorted_set:
-                    # Advance pending_idx past this path if it is next in line.
-                    while (
-                        pending_idx < pending_total and new_paths_sorted[pending_idx] <= stored_path
-                    ):
-                        pending_idx += 1
-            else:
-                # Copy: preserve the original element verbatim.
-                content_elem = elem.find("content")
-                content = (
-                    content_elem.text if content_elem is not None and content_elem.text else ""
-                )
-                parts.append(self._render_file_element(stored_path, content))
-
-            elem.clear()
-
-        # Drain: append any new entries that sort after all existing entries.
-        while pending_idx < pending_total:
-            new_path = new_paths_sorted[pending_idx]
-            parts.append(self._render_file_element(new_path, new_entries_by_path[new_path]))
-            pending_idx += 1
-
-        parts.append("</archive>\n")
-
-        if epilogue:
-            parts.append(_EPILOGUE_SENTINEL)
-            parts.append(epilogue)
-
-        async with async_open(tmp_path, "w", encoding="utf-8") as afp:
-            await afp.write("".join(parts))
-
-    @staticmethod
-    def _render_file_element(path: str, content: str) -> str:
-        """Serialize a single ``<file>`` element with CDATA content to a string."""
-        file_elem = etree.Element("file", path=path)
-        content_elem = etree.SubElement(file_elem, "content")
-        content_elem.text = etree.CDATA(content)
-        return (
-            "  "
-            + etree.tostring(file_elem, encoding="unicode", xml_declaration=False).rstrip("\n")
-            + "\n"
-        )
-
-
-# ===========================================================================
 # Layer 4 — XML Serialization
 # ===========================================================================
 
@@ -815,9 +621,9 @@ class QuiverFile:
     Supported modes:
         `'r'`: Open for reading; parses the archive immediately on open.
         `'w'`: Open for writing; creates or overwrites the archive.
-        `'a'`: Open for appending; upserts new entries into the existing archive
-            using a streaming merge so that the result remains alphabetically
-            sorted without loading the entire archive into RAM.
+        `'a'`: Open for appending; parses the existing archive on open, then
+            upserts new entries (insert new, replace existing) via [add][QuiverFile.add].
+            The result is written atomically on [close][QuiverFile.close].
 
     Example:
         ```python
@@ -850,6 +656,14 @@ class QuiverFile:
             archive_path = Path(name)
             if not archive_path.exists():
                 raise FileNotFoundError(f"Archive not found: {name!r}")
+            raw_entries, parsed_preamble, parsed_epilogue = _parse_archive(name)
+            self._preamble = parsed_preamble if parsed_preamble.strip() else None
+            self._epilogue = parsed_epilogue if parsed_epilogue.strip() else None
+            self._entries = [
+                (QuiverInfo(name=stored_path, size=len(content.encode("utf-8"))), content)
+                for stored_path, content in raw_entries
+            ]
+        elif mode == "a" and Path(name).exists():
             raw_entries, parsed_preamble, parsed_epilogue = _parse_archive(name)
             self._preamble = parsed_preamble if parsed_preamble.strip() else None
             self._epilogue = parsed_epilogue if parsed_epilogue.strip() else None
@@ -946,7 +760,13 @@ class QuiverFile:
             else:
                 effective_arcname = arcname
             entries = _PackPipeline(root_dir=file_path, arcname=effective_arcname).run()
-            self._entries.extend(entries)
+            # Upsert each packed entry: replace existing path matches, or append.
+            existing_by_path = {info.name: i for i, (info, _) in enumerate(self._entries)}
+            for new_info, new_content in entries:
+                if new_info.name in existing_by_path:
+                    self._entries[existing_by_path[new_info.name]] = (new_info, new_content)
+                else:
+                    self._entries.append((new_info, new_content))
             return
 
         content = _read_text_file(file_path)
@@ -954,6 +774,12 @@ class QuiverFile:
             _normalize_stored_path(arcname) if arcname is not None else _normalize_path(file_path)
         )
         info = QuiverInfo(name=stored_path, size=len(content.encode("utf-8")))
+        # Upsert: replace an existing entry with the same path, or append.
+        for i, (existing_info, _) in enumerate(self._entries):
+            if existing_info.name == stored_path:
+                self._entries[i] = (info, content)
+                logger.debug("Added file", entry_path=stored_path, size=info.size)
+                return
         self._entries.append((info, content))
         logger.debug("Added file", entry_path=stored_path, size=info.size)
 
@@ -1035,25 +861,18 @@ class QuiverFile:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the archive, writing or merging the XML file if in write/append mode.
+        """Close the archive, writing the XML file if in write/append mode.
 
         - In `'w'` mode: sorts all added entries alphabetically, builds the XML
           tree, and serializes it to the output file (creates or overwrites).
-        - In `'a'` mode: runs the streaming merge pipeline, upsert-inserting
-          entries into the existing archive, then atomically replaces it.
+        - In `'a'` mode: merges the pre-parsed existing entries with any newly
+          added entries (upsert semantics applied by [add][QuiverFile.add]) and
+          writes the result, atomically replacing the original.
         """
         if self._closed:
             return
         self._closed = True
 
-        if self._mode == "w":
+        if self._mode in {"w", "a"}:
             _write_archive(self._name, self._entries, self._preamble, self._epilogue)
             logger.debug("Archive written", archive_name=self._name)
-        elif self._mode == "a":
-            _UpsertPipeline(
-                self._name,
-                self._entries,
-                preamble=self._preamble,
-                epilogue=self._epilogue,
-            ).run()
-            logger.debug("Archive upserted", archive_name=self._name)
