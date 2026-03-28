@@ -80,6 +80,9 @@ Run sequence: `uv run ruff format src/ tests/ && uv run ruff check src/ tests/ &
     - `archive.py` -> `test_archive.py`.
     - `utils/__init__.py` -> `test_utils.py`.
 - **Practices:** Use `tmp_path` for FS tests; prioritize critical path coverage.
+- **Test helper directory naming:** Never name a `_make_archive`-style helper's staging directory `src/` when the test fixture also creates subdirectories named `src/` inside it — the packed directory name becomes part of every stored path, so `src/src/main.py` would result. Use a neutral name like `project/` instead.
+- **Path assertions in directory-pack tests:** Stored paths always include the top-level directory name as a prefix (e.g. `project/src/main.py`). Assertions must reflect the full path, not just the filename. When the exact prefix is unknown (e.g. absolute-path single-file adds via CLI), use `endswith()` or `rglob()` rather than equality checks.
+- **Upsert path matching:** The upsert merge compares **full stored paths** (e.g. `mydir/foo.txt`), not just filenames. To trigger an actual upsert in a test, the replacement file must be added from a directory whose name matches the one used in the original `add()` call.
 
 
 ## Tech Stack & Standards
@@ -197,7 +200,7 @@ Command style mirrors `tar`:
 - **CLI:** Single Click command; emulates tar-style bundled short flags (`-cvf`) via custom pre-processing expansion.
 - **Concurrency/OOM:** Asyncio/threading with size-limited queues (Reader/Writer pattern) for backpressure; chunk-stream large files to prevent OOM.
 - **Single Writer:** One dedicated task handles XML output for determinism, Git-friendliness, and deadlock prevention.
-- **Normalization:** POSIX paths (forward slashes) only; file entries sorted alphabetically in XML.
+- **Normalization:** POSIX paths (forward slashes) only; file entries sorted alphabetically in XML by **full stored path** (not just filename). When packing a directory, its own name is prepended as the path prefix — `add("mydir")` stores `mydir/file.txt`, not `file.txt`. This matches `tar` semantics and ensures extraction recreates the original directory structure. The `arcname` parameter overrides the prefix. The edge case `Path(".").name == ""` is handled by falling back to `Path(".").resolve().name`.
 - **Security:** UTF-8 text only; sandbox unpacking; abort on absolute paths or traversal (`../`) attempts. `_validate_extraction_path()` (Layer 1) performs pre-resolution rejection of absolute paths and `..` components, then confirms the resolved path is inside the destination with `Path.relative_to()`.
 - **Content validation (Layer 2):** File content goes through two sequential checks inside `_read_text_file()` / `_read_text_file_async()` before it is stored:
   1. `_decode_utf8()` — rejects non-UTF-8 bytes → `BinaryFileError`.
