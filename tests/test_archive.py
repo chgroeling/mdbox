@@ -676,112 +676,135 @@ def test_directory_tree_empty_archive() -> None:
 
 
 # ---------------------------------------------------------------------------
-# QuiverFile.delete()
+# QuiverFile public properties (preamble, epilogue, entries)
 # ---------------------------------------------------------------------------
 
 
-def _make_archive_and_parse(tmp_path: Path, files: dict[str, str]) -> Path:
-    """Create a 'w'-mode archive with *files* and return its path."""
+def test_preamble_property_none_when_not_set(tmp_path: Path) -> None:
+    """preamble is None when no preamble was supplied or parsed."""
     archive = tmp_path / "archive.xml"
     with QuiverFile.open(str(archive), mode="w") as qf:
-        for rel, content in files.items():
-            f = tmp_path / rel
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(content, encoding="utf-8")
-            qf.add(str(f), arcname=rel)
-    return archive
+        assert qf.preamble is None
 
 
-def test_delete_single_entry(tmp_path: Path) -> None:
-    """delete() removes an exact-match entry from the archive."""
-    archive = _make_archive_and_parse(tmp_path, {"a.txt": "A", "b.txt": "B", "c.txt": "C"})
-
-    with QuiverFile.open(str(archive), mode="a") as qf:
-        qf.delete("b.txt")
-
-    with QuiverFile.open(str(archive), mode="r") as qf:
-        names = qf.getnames()
-    assert "b.txt" not in names
-    assert "a.txt" in names
-    assert "c.txt" in names
-
-
-def test_delete_directory_prefix(tmp_path: Path) -> None:
-    """delete() with a directory prefix removes all entries under that prefix."""
-    archive = _make_archive_and_parse(
-        tmp_path,
-        {
-            "src/main.py": "main",
-            "src/utils/helper.py": "helper",
-            "readme.txt": "readme",
-        },
-    )
-
-    with QuiverFile.open(str(archive), mode="a") as qf:
-        qf.delete("src")
-
-    with QuiverFile.open(str(archive), mode="r") as qf:
-        names = qf.getnames()
-    assert "src/main.py" not in names
-    assert "src/utils/helper.py" not in names
-    assert "readme.txt" in names
-
-
-def test_delete_nonexistent_path_is_noop(tmp_path: Path) -> None:
-    """delete() with a path not in the archive is a silent no-op."""
-    archive = _make_archive_and_parse(tmp_path, {"a.txt": "A", "b.txt": "B"})
-    raw_before = archive.read_text(encoding="utf-8")
-
-    with QuiverFile.open(str(archive), mode="a") as qf:
-        qf.delete("does/not/exist.txt")
-
-    assert archive.read_text(encoding="utf-8") == raw_before
-
-
-def test_delete_in_read_mode_raises(tmp_path: Path) -> None:
-    """delete() raises ValueError when the archive is opened in read mode."""
-    archive = _make_archive_and_parse(tmp_path, {"a.txt": "A"})
-
-    with QuiverFile.open(str(archive), mode="r") as qf, pytest.raises(ValueError, match="mode"):
-        qf.delete("a.txt")
-
-
-def test_delete_in_write_mode_raises(tmp_path: Path) -> None:
-    """delete() raises ValueError when the archive is opened in write mode."""
+def test_preamble_property_returns_value(tmp_path: Path) -> None:
+    """preamble returns the text supplied at open time."""
     archive = tmp_path / "archive.xml"
-    with QuiverFile.open(str(archive), mode="w") as qf:
+    with QuiverFile.open(str(archive), mode="w", preamble="hello\n") as qf:
+        assert qf.preamble == "hello\n"
+
+
+def test_preamble_property_parsed_from_archive(tmp_path: Path) -> None:
+    """preamble is parsed and returned when opening an existing archive in read mode."""
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w", preamble="# header\n") as qf:
         f = tmp_path / "a.txt"
         f.write_text("A", encoding="utf-8")
         qf.add(str(f), arcname="a.txt")
-        with pytest.raises(ValueError, match="mode"):
-            qf.delete("a.txt")
-
-
-def test_delete_on_closed_archive_raises(tmp_path: Path) -> None:
-    """delete() raises ValueError when called after the archive is closed."""
-    archive = _make_archive_and_parse(tmp_path, {"a.txt": "A"})
-    qf = QuiverFile.open(str(archive), mode="a")
-    qf.close()
-
-    with pytest.raises(ValueError, match="closed"):
-        qf.delete("a.txt")
-
-
-def test_delete_all_entries(tmp_path: Path) -> None:
-    """Deleting every entry leaves an empty archive with a '.' directory tree."""
-    archive = _make_archive_and_parse(tmp_path, {"a.txt": "A", "b.txt": "B"})
-
-    with QuiverFile.open(str(archive), mode="a") as qf:
-        for name in list(qf.getnames()):
-            qf.delete(name)
 
     with QuiverFile.open(str(archive), mode="r") as qf:
-        assert qf.getnames() == []
+        assert qf.preamble == "# header\n"
 
-    raw = archive.read_text(encoding="utf-8")
-    start = raw.index("<archive")
-    end = raw.index("</archive>") + len("</archive>")
-    root = etree.fromstring(raw[start:end].encode())
-    dt = root.find("directory_tree")
-    assert dt is not None
-    assert (dt.text or "").strip() == "."
+
+def test_epilogue_property_none_when_not_set(tmp_path: Path) -> None:
+    """epilogue is None when no epilogue was supplied or parsed."""
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w") as qf:
+        assert qf.epilogue is None
+
+
+def test_epilogue_property_returns_value(tmp_path: Path) -> None:
+    """epilogue returns the text supplied at open time."""
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w", epilogue="# footer\n") as qf:
+        assert qf.epilogue == "# footer\n"
+
+
+def test_epilogue_property_parsed_from_archive(tmp_path: Path) -> None:
+    """epilogue is parsed and returned when opening an existing archive in read mode."""
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w", epilogue="# footer\n") as qf:
+        f = tmp_path / "a.txt"
+        f.write_text("A", encoding="utf-8")
+        qf.add(str(f), arcname="a.txt")
+
+    with QuiverFile.open(str(archive), mode="r") as qf:
+        assert qf.epilogue == "# footer\n"
+
+
+def test_entries_property_returns_defensive_copy(tmp_path: Path) -> None:
+    """entries returns a list; mutating it does not affect the archive."""
+    archive = tmp_path / "archive.xml"
+    f = tmp_path / "a.txt"
+    f.write_text("A", encoding="utf-8")
+    with QuiverFile.open(str(archive), mode="w") as qf:
+        qf.add(str(f), arcname="a.txt")
+        copy = qf.entries
+        copy.clear()
+        assert len(qf.entries) == 1
+
+
+def test_entries_property_contains_info_and_content(tmp_path: Path) -> None:
+    """entries exposes (QuiverInfo, str) pairs with correct name and content."""
+    archive = tmp_path / "archive.xml"
+    f = tmp_path / "hello.txt"
+    f.write_text("world", encoding="utf-8")
+    with QuiverFile.open(str(archive), mode="w") as qf:
+        qf.add(str(f), arcname="hello.txt")
+
+    with QuiverFile.open(str(archive), mode="r") as qf:
+        pairs = qf.entries
+    assert len(pairs) == 1
+    info, content = pairs[0]
+    assert info.name == "hello.txt"
+    assert content == "world"
+
+
+# ---------------------------------------------------------------------------
+# QuiverFile.add_data()
+# ---------------------------------------------------------------------------
+
+
+def test_add_data_inserts_entry(tmp_path: Path) -> None:
+    """add_data() writes in-memory content into the archive."""
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w") as qf:
+        qf.add_data("notes.txt", "some notes")
+
+    with QuiverFile.open(str(archive), mode="r") as qf:
+        assert "notes.txt" in qf.getnames()
+        info, content = qf.entries[0]
+        assert content == "some notes"
+        assert info.size == len(b"some notes")
+
+
+def test_add_data_upserts_existing_entry(tmp_path: Path) -> None:
+    """add_data() replaces an existing entry with the same arcname."""
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w") as qf:
+        qf.add_data("notes.txt", "old")
+        qf.add_data("notes.txt", "new")
+
+    with QuiverFile.open(str(archive), mode="r") as qf:
+        assert qf.getnames().count("notes.txt") == 1
+        _, content = qf.entries[0]
+        assert content == "new"
+
+
+def test_add_data_raises_in_read_mode(tmp_path: Path) -> None:
+    """add_data() raises ValueError when the archive is in read mode."""
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w") as qf:
+        qf.add_data("a.txt", "A")
+
+    with QuiverFile.open(str(archive), mode="r") as qf, pytest.raises(ValueError, match="mode"):
+        qf.add_data("b.txt", "B")
+
+
+def test_add_data_raises_after_close(tmp_path: Path) -> None:
+    """add_data() raises ValueError when called after the archive is closed."""
+    archive = tmp_path / "archive.xml"
+    qf = QuiverFile.open(str(archive), mode="w")
+    qf.close()
+    with pytest.raises(ValueError, match="closed"):
+        qf.add_data("a.txt", "A")

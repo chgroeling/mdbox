@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import click
 
-from quiver.archive import BinaryFileError, PathTraversalError, QuiverFile
+from quiver.archive import BinaryFileError, PathTraversalError, QuiverFile, _normalize_stored_path
 from quiver.logging import configure_debug_logging, get_console
 
 _BUNDLABLE_FLAGS = {"a", "c", "x", "v", "f"}
@@ -237,19 +240,45 @@ def _run_delete(
     if not inputs:
         raise click.UsageError("Provide at least one path to delete from the archive.")
 
+    archive_path = Path(archive_file)
+    if not archive_path.exists():
+        click.echo(f"Error: Archive not found: {archive_file!r}", err=True)
+        sys.exit(1)
+
     console = get_console(verbose)
     if verbose:
         targets = ", ".join(inputs)
         console.print(f"Deleting [bold]{targets}[/bold] from [bold]{archive_file}[/bold]...")
 
-    if not Path(archive_file).exists():
-        click.echo(f"Error: Archive not found: {archive_file!r}", err=True)
-        sys.exit(1)
+    # Normalise all target paths once so matching is consistent.
+    normalized_targets = {_normalize_stored_path(t) for t in inputs}
+    dir_prefixes = {t.rstrip("/") + "/" for t in normalized_targets}
+
+    def _keep(name: str) -> bool:
+        return name not in normalized_targets and not any(
+            name.startswith(pfx) for pfx in dir_prefixes
+        )
 
     try:
-        with QuiverFile.open(archive_file, mode="a") as qf:
-            for target in inputs:
-                qf.delete(target)
+        with QuiverFile.open(archive_file, mode="r") as src:
+            filtered = [(info, content) for info, content in src.entries if _keep(info.name)]
+            preamble = src.preamble
+            epilogue = src.epilogue
+
+        # Write to a sibling temp file then atomically replace the original.
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=archive_path.parent, prefix=".quiver-", suffix=".tmp"
+        )
+        try:
+            os.close(tmp_fd)
+            with QuiverFile.open(tmp_name, mode="w", preamble=preamble, epilogue=epilogue) as dst:
+                for info, content in filtered:
+                    dst.add_data(info.name, content)
+            Path(tmp_name).replace(archive_file)
+        except Exception:
+            with contextlib.suppress(OSError):
+                Path(tmp_name).unlink()
+            raise
     except FileNotFoundError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)

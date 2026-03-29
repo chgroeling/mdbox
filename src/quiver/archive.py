@@ -783,44 +783,54 @@ class QuiverFile:
         self._entries.append((info, content))
         logger.debug("Added file", entry_path=stored_path, size=info.size)
 
-    def delete(self, target_path: str) -> None:
-        """Remove entries matching *target_path* from the archive.
+    def add_data(self, arcname: str, content: str) -> None:
+        """Add an in-memory string as an archive entry.
 
-        Accepts an exact file path or a directory prefix. When a directory
-        prefix is given, all entries whose stored path starts with
-        ``target_path + "/"`` are removed.  If *target_path* does not match
-        any entry, the archive is left unchanged (no-op; no error is raised).
+        Upserts: if an entry with the same *arcname* already exists it is
+        replaced; otherwise the entry is appended.  Suitable for repacking
+        workflows where content is already loaded in memory.
 
         Args:
-            target_path: POSIX path to delete — either an exact file path
-                (e.g. ``"src/main.py"``) or a directory prefix
-                (e.g. ``"src/utils"`` removes all ``src/utils/…`` entries).
+            arcname: POSIX path to store inside the archive.
+            content: UTF-8 text content for the entry.
 
         Raises:
-            ValueError: If the archive is not open in append mode, or if it
-                has already been closed.
+            ValueError: If the archive is not open for writing/appending,
+                or if it has already been closed.
         """
-        if self._mode != "a":
-            raise ValueError(
-                f"Cannot delete entries in mode {self._mode!r}. Open the archive with mode 'a'."
-            )
+        if self._mode not in {"w", "a"}:
+            raise ValueError(f"Cannot add files in mode {self._mode!r}. Use mode 'w' or 'a'.")
         if self._closed:
-            raise ValueError("Cannot delete entries from a closed archive.")
+            raise ValueError("Cannot add data to a closed archive.")
 
-        normalized = _normalize_stored_path(target_path)
-        dir_prefix = normalized.rstrip("/") + "/"
-        before = len(self._entries)
-        self._entries = [
-            (info, content)
-            for info, content in self._entries
-            if info.name != normalized and not info.name.startswith(dir_prefix)
-        ]
-        removed = before - len(self._entries)
-        logger.debug("Deleted entries", deleted_path=normalized, removed_count=removed)
+        stored_path = _normalize_stored_path(arcname)
+        info = QuiverInfo(name=stored_path, size=len(content.encode("utf-8")))
+        for i, (existing_info, _) in enumerate(self._entries):
+            if existing_info.name == stored_path:
+                self._entries[i] = (info, content)
+                logger.debug("Added data", entry_path=stored_path, size=info.size)
+                return
+        self._entries.append((info, content))
+        logger.debug("Added data", entry_path=stored_path, size=info.size)
 
     # ------------------------------------------------------------------
     # Read API
     # ------------------------------------------------------------------
+
+    @property
+    def preamble(self) -> str | None:
+        """Return the preamble text parsed from or supplied to the archive."""
+        return self._preamble
+
+    @property
+    def epilogue(self) -> str | None:
+        """Return the epilogue text parsed from or supplied to the archive."""
+        return self._epilogue
+
+    @property
+    def entries(self) -> list[tuple[QuiverInfo, str]]:
+        """Return a defensive copy of all `(QuiverInfo, content)` pairs."""
+        return list(self._entries)
 
     def getnames(self) -> list[str]:
         """Return a list of archive member paths.
