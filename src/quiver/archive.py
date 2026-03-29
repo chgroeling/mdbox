@@ -36,7 +36,7 @@ logger = structlog.get_logger(__name__)
 # Layer 0 — Constants & Exceptions
 # ===========================================================================
 
-VALID_MODES = frozenset({"r", "w", "a"})
+VALID_MODES = frozenset({"r", "w"})
 ARCHIVE_VERSION = "1.0"
 MAX_DIRECTORY_READERS = 8
 QUEUE_MAXSIZE = 64
@@ -673,9 +673,6 @@ class QuiverFile:
     Supported modes:
         `'r'`: Open for reading; parses the archive immediately on open.
         `'w'`: Open for writing; creates or overwrites the archive.
-        `'a'`: Open for appending; parses the existing archive on open, then
-            upserts new entries (insert new, replace existing) via [add][QuiverFile.add].
-            The result is written atomically on [close][QuiverFile.close].
 
     Example:
         ```python
@@ -722,21 +719,6 @@ class QuiverFile:
                 elapsed_s=round(time.perf_counter() - t0, 4),
                 entry_count=len(raw_entries),
             )
-        elif mode == "a" and Path(name).exists():
-            t0 = time.perf_counter()
-            raw_entries, parsed_preamble, parsed_epilogue = _parse_archive(name)
-            self._preamble = parsed_preamble if parsed_preamble.strip() else None
-            self._epilogue = parsed_epilogue if parsed_epilogue.strip() else None
-            self._entries = [
-                (QuiverInfo(name=stored_path, size=len(content.encode("utf-8"))), content)
-                for stored_path, content in raw_entries
-            ]
-            logger.debug(
-                "Archive parsed",
-                archive_name=name,
-                elapsed_s=round(time.perf_counter() - t0, 4),
-                entry_count=len(raw_entries),
-            )
 
     # ------------------------------------------------------------------
     # Factory
@@ -753,7 +735,7 @@ class QuiverFile:
 
         Args:
             name: Path to the archive file.
-            mode: `'r'` (read), `'w'` (write), or `'a'` (append).
+            mode: `'r'` (read) or `'w'` (write).
             preamble: Optional text to prepend before the XML when writing.
                 Ignored in read mode (preamble is parsed from the file).
             epilogue: Optional text to append after the XML when writing.
@@ -763,7 +745,7 @@ class QuiverFile:
             A new [QuiverFile][] instance.
 
         Raises:
-            ValueError: If *mode* is not one of `'r'`, `'w'`, `'a'`.
+            ValueError: If *mode* is not `'r'` or `'w'`.
         """
         return QuiverFile(name, mode, preamble=preamble, epilogue=epilogue)
 
@@ -802,11 +784,10 @@ class QuiverFile:
         Raises:
             FileNotFoundError: If *name* does not exist.
             BinaryFileError: If *name* cannot be decoded as UTF-8 text.
-            ValueError: If the archive is not open for writing/appending,
-                or if it has already been closed.
+            ValueError: If the archive is not open for writing, or if it has already been closed.
         """
-        if self._mode not in {"w", "a"}:
-            raise ValueError(f"Cannot add files in mode {self._mode!r}. Use mode 'w' or 'a'.")
+        if self._mode != "w":
+            raise ValueError(f"Cannot add files in mode {self._mode!r}. Use mode 'w'.")
         if self._closed:
             raise ValueError("Cannot add files to a closed archive.")
 
@@ -867,11 +848,10 @@ class QuiverFile:
             PathTraversalError: If *arcname* is absolute or contains ``..``.
             BinaryFileError: If *content* contains XML-incompatible control
                 characters.
-            ValueError: If the archive is not open for writing/appending,
-                or if it has already been closed.
+            ValueError: If the archive is not open for writing, or if it has already been closed.
         """
-        if self._mode not in {"w", "a"}:
-            raise ValueError(f"Cannot add files in mode {self._mode!r}. Use mode 'w' or 'a'.")
+        if self._mode != "w":
+            raise ValueError(f"Cannot add files in mode {self._mode!r}. Use mode 'w'.")
         if self._closed:
             raise ValueError("Cannot add data to a closed archive.")
 
@@ -989,19 +969,16 @@ class QuiverFile:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the archive, writing the XML file if in write/append mode.
+        """Close the archive, writing the XML file if in write mode.
 
-        - In `'w'` mode: sorts all added entries alphabetically, builds the XML
-          tree, and serializes it to the output file (creates or overwrites).
-        - In `'a'` mode: merges the pre-parsed existing entries with any newly
-          added entries (upsert semantics applied by [add][QuiverFile.add]) and
-          writes the result, atomically replacing the original.
+        In `'w'` mode: sorts all added entries alphabetically, builds the XML
+        tree, and serializes it to the output file (creates or overwrites).
         """
         if self._closed:
             return
         self._closed = True
 
-        if self._mode in {"w", "a"}:
+        if self._mode == "w":
             t0 = time.perf_counter()
             _write_archive(self._name, self._entries, self._preamble, self._epilogue)
             logger.debug(

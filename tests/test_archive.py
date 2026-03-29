@@ -40,9 +40,8 @@ def test_quiverinfo_repr() -> None:
 
 
 def test_valid_modes(tmp_path: Path) -> None:
-    for mode in ("w", "a"):
-        qf = QuiverFile("archive.xml", mode=mode)
-        assert qf._mode == mode
+    qf = QuiverFile("archive.xml", mode="w")
+    assert qf._mode == "w"
     # Read mode requires an existing archive file.
     archive = tmp_path / "archive.xml"
     f = tmp_path / "f.txt"
@@ -51,6 +50,11 @@ def test_valid_modes(tmp_path: Path) -> None:
         qf.add(str(f))
     qf_r = QuiverFile(str(archive), mode="r")
     assert qf_r._mode == "r"
+
+
+def test_append_mode_rejected() -> None:
+    with pytest.raises(ValueError, match="Invalid mode"):
+        QuiverFile("archive.xml", mode="a")
 
 
 def test_invalid_mode_raises() -> None:

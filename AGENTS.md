@@ -102,7 +102,7 @@ Public API mirrors `tarfile`. Entry: `quiver.open()`.
 
 ### `QuiverFile` (`src/quiver/archive.py`)
 - **Factory**: `QuiverFile.open(name, mode, preamble=None, epilogue=None)`
-- **Modes**: `'r'` (read), `'w'` (write), `'a'` (append).
+- **Modes**: `'r'` (read), `'w'` (write).
 - **Context Manager**: Auto-calls `close()`.
 - **`add(name, arcname=None)`**:
   - Validates UTF-8 & XML-1.0 compatibility.
@@ -111,7 +111,7 @@ Public API mirrors `tarfile`. Entry: `quiver.open()`.
   - Uses async reader/writer with bounded backpressure.
 - **`add_text(arcname, content)`**:
   - Inserts an in-memory string as an archive entry (upserts by `arcname`).
-  - Requires mode `'w'` or `'a'`. Useful for repack workflows.
+  - Requires mode `'w'`. Useful for repack workflows.
 - **`preamble` / `epilogue`** (read-only properties): Return preamble/epilogue text parsed from or supplied to the archive (`None` if absent).
 - **`entries`** (read-only property): Return a defensive copy of all `(QuiverInfo, content)` pairs in the archive.
 - **`close()`**: Sorts entries, builds `lxml` tree, writes to disk. **Aborts** if `__exit__` has propagating exception.
@@ -137,7 +137,7 @@ Style: `tar` (e.g., `quiver -cvf archive.xml src`)
 
 - **-c (Create)**: `quiver -cf <archive.xml> <path...>`
 - **-x (Extract)**: `quiver -xf <archive.xml> [dest]` (default: `.`)
-- **-a (Add/Upsert)**: `quiver -af <archive.xml> <path...>` New/replace; maintains alpha-order. Creates if missing.
+- **-a (Add/Upsert)**: `quiver -af <archive.xml> <path...>` New/replace; maintains alpha-order. Creates if missing. **Implemented as a CLI-only repack** (read → merge → write to temp file → atomic rename); no `'a'` mode exists on the Python API.
 - **--delete (Delete)**: `quiver --delete -f <archive.xml> <path...>` Remove files or directory prefixes; no-op if not found. No short flag. **Implemented as a CLI-only repack** (read → filter → write to temp file → atomic rename); no `delete()` method exists on the Python API.
 - **-v (Verbose)**: Enables stdout.
 - **--debug**: Detailed logging (no short flag).
@@ -169,6 +169,7 @@ Style: `tar` (e.g., `quiver -cvf archive.xml src`)
 | `_ExtractPipeline.run`            | `elapsed_s=`, `file_count=`, `total_bytes=`   |
 | `_ExtractPipeline._writer_worker` | `entry_path=`, `size=`                        |
 | `_run_delete` (cli.py)            | `elapsed_s=`, `deleted_count=`, `kept_count=` |
+| `_run_add` (cli.py)               | `elapsed_s=`, `entry_count=`                  |
 
 ## Architecture & Mechanisms
 - **CLI:** Tar-style bundled flags (`-cvf`) via custom pre-processing.
@@ -179,7 +180,8 @@ Style: `tar` (e.g., `quiver -cvf archive.xml src`)
 - **Content Validation (L2):** Checks inside `_read_text_file[_async]()` raise `BinaryFileError`: 1) `_decode_utf8()` (rejects non-UTF-8). 2) `_validate_xml_compatible()` (rejects `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]`, max 5 errors reported) preventing late `lxml` serialization crash.
 - **Extraction (`_ExtractPipeline`, L3.5):** Bounded `asyncio.Queue` streams `(path, content)` to concurrent workers that validate, create dirs (`to_thread`), and write (`aiofile`). Isolated XML parsed via `lxml.etree.fromstring`.
 - **Transactions (`__exit__`):** If `exc_type` exists, `QuiverFile.__exit__` sets `self._closed = True` without `close()`. Prevents corrupt/truncated archive on failed `add()` (matches `tarfile`).
-- **Modes ('r'/'a') & Upsert:** Open `'r'` or `'a'` parses archive (`_parse_archive()`), populating `_entries`, `_preamble`, `_epilogue` (`'r'` raises `FileNotFoundError` if missing). Upserts are in-RAM replace/append via `add()`; `close()` behaves like `'w'` mode. *Do not re-introduce separate upsert pipeline.*
+- **Modes ('r'/'w'):** Open `'r'` parses archive (`_parse_archive()`), populating `_entries`, `_preamble`, `_epilogue` (raises `FileNotFoundError` if missing). Open `'w'` starts with an empty entry list; `close()` writes to disk.
+- **Add/Upsert (CLI repack):** `-a` is not a Python API mode. The CLI opens the archive in `'r'` mode, reads `entries`/`preamble`/`epilogue` via public properties, replays existing entries via `add_text()` into a `'w'`-mode temp file, adds new inputs via `add()` (upsert semantics handled in-memory), then atomically replaces the original with `os.replace()`. When the archive does not exist, `-a` degrades to a plain `'w'` create. No partial writes can corrupt the archive.
 - **Delete (CLI repack):** `--delete` is not a Python API method. The CLI opens the archive in `'r'` mode, reads `entries`/`preamble`/`epilogue` via public properties, filters entries, writes the result to a sibling temp file via `'w'` mode + `add_text()`, then atomically replaces the original with `os.replace()`. No partial writes can corrupt the archive.
 - **Embedded Text & Sentinels (L0):** `_split_archive_text()` isolates *first* `<archive>`...`</archive>`; rest is preamble/epilogue (first-match rule). `_PREAMBLE_SENTINEL = "\n"`, `_EPILOGUE_SENTINEL = ""`. Sync required if changed.
 - **XML Specs:** Unescaped `<![CDATA[...]]>`, no entity encoding. `<directory_tree>` is first child, CDATA-wrapped (`"\n" + tree_text + "\n"`), `"."` if empty.

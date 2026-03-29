@@ -211,15 +211,51 @@ def _run_add(
     if not inputs:
         raise click.UsageError("Provide at least one input file or directory to add.")
 
+    archive_path = Path(archive_file)
     console = get_console(verbose)
     if verbose:
         sources = ", ".join(str(Path(path)) for path in inputs)
         console.print(f"Upserting [bold]{sources}[/bold] → [bold]{archive_file}[/bold]...")
 
     try:
-        with QuiverFile.open(archive_file, mode="a") as qf:
-            for input_path in inputs:
-                qf.add(input_path)
+        t0 = time.perf_counter()
+        if archive_path.exists():
+            # Repack: read existing archive, merge new inputs, write to temp, atomic rename.
+            with QuiverFile.open(archive_file, mode="r") as src:
+                existing_entries = src.entries
+                preamble = src.preamble
+                epilogue = src.epilogue
+
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                dir=archive_path.parent, prefix=".quiver-", suffix=".tmp"
+            )
+            try:
+                os.close(tmp_fd)
+                with QuiverFile.open(
+                    tmp_name, mode="w", preamble=preamble, epilogue=epilogue
+                ) as dst:
+                    for info, content in existing_entries:
+                        dst.add_text(info.name, content)
+                    for input_path in inputs:
+                        dst.add(input_path)
+                Path(tmp_name).replace(archive_file)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    Path(tmp_name).unlink()
+                raise
+            entry_count = len(existing_entries)
+        else:
+            # Archive does not exist — create it from scratch.
+            with QuiverFile.open(archive_file, mode="w") as dst:
+                for input_path in inputs:
+                    dst.add(input_path)
+            entry_count = 0
+
+        logger.debug(
+            "Add repack completed",
+            elapsed_s=round(time.perf_counter() - t0, 4),
+            entry_count=entry_count,
+        )
     except FileNotFoundError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)

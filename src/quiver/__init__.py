@@ -27,7 +27,7 @@ def open(
 
     Args:
         name: Path to the archive file.
-        mode: ``'r'`` (read), ``'w'`` (write), or ``'a'`` (append).
+        mode: ``'r'`` (read) or ``'w'`` (write).
         preamble: Optional text to prepend before the XML when writing.
             Ignored in read mode (preamble is parsed from the file).
         epilogue: Optional text to append after the XML when writing.
