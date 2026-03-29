@@ -4,38 +4,21 @@
 `quiver` is a high-performance Python utility that bi-directionally serializes text file directories into a strictly structured, machine-readable XML format.
 
 ## Project Structure
-
 ```text
 quiver/
-├── .python-version              # Python 3.12.3 version pin
-├── pyproject.toml               # Project configuration and dependencies
-├── uv.lock                      # Locked dependency versions (tracked in git)
-├── .gitignore                   # Git ignore rules
-├── AGENTS.md                    # This file - developer guidelines
-├── LICENSE                      # MIT License
-├── README.md                    # Project documentation
-│
-├── src/quiver/                  # Main source code (src-layout)
-│   ├── __init__.py              # Package metadata + quiver.open() factory
-│   ├── archive.py               # QuiverFile, QuiverInfo, BinaryFileError, XML logic
-│   ├── cli.py                   # Click CLI entry point
-│   ├── logging.py               # configure_debug_logging(), get_console()
-│   └── utils/                   # Utility modules
-│       └── __init__.py
-│
-├── tests/                       # Test suite
-│   ├── __init__.py
-│   ├── conftest.py              # Pytest fixtures and configuration
-│   ├── test_cli.py              # CLI smoke tests
-│   ├── test_archive.py          # QuiverFile / QuiverInfo unit tests
-│   ├── test_create_cli.py       # create operation integration tests
-│   ├── test_extract_cli.py      # extract operation integration tests
-│   ├── test_add_cli.py          # add/upsert operation integration tests
-│   ├── test_embedding.py        # preamble/epilogue embedding integration tests
-│   └── test_utils.py            # utils/__init__.py unit tests
-│
-└── docs/                        # MkDocs documentation
-    └── index.md                 # Documentation home page
+├── .python-version, pyproject.toml, uv.lock  # Env & Dependency management
+├── AGENTS.md, README.md, LICENSE             # Docs & Guidelines
+├── src/quiver/                               # Source (src-layout)
+│   ├── __init__.py                           # Metadata + quiver.open()
+│   ├── archive.py                            # QuiverFile, QuiverInfo, XML logic
+│   ├── cli.py                                # Click CLI entry point
+│   ├── logging.py                            # Debug & console config
+│   └── utils/                                # Utility modules
+├── tests/                                    # Pytest suite
+│   ├── conftest.py                           # Fixtures
+│   ├── test_archive.py, test_utils.py        # Unit tests
+│   └── test_*_cli.py, test_embedding.py      # Integration tests
+└── docs/                                     # MkDocs source
 ```
 
 # Development Workflows
@@ -59,31 +42,17 @@ quiver/
 ## Testing & QA
 
 ### Quality Checks
-Uses `ruff` (lint/format) and `mypy` (types) for speed and centralization.
-- **Lint:** `uv run ruff check src/ tests/`
-- **Format:** `uv run ruff format src/ tests/`
-- **Format Check:** `uv run ruff format --check src/ tests/`
-- **Type Check:** `uv run mypy src/`
+**Tools:** `ruff` (lint/fmt), `mypy` (types). Prefix cmds with `uv run`.
+- **Fmt/Lint:** `ruff format [--check] src/ tests/`, `ruff check src/ tests/`
+- **Types:** `mypy src/`
+- **Pre-Commit Gate:** `uv run ruff format src/ tests/ && uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest`
 
-### Pre-Commit Gate
-Run sequence: `uv run ruff format src/ tests/ && uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest`
-
-### Execution
-- **All:** `uv run pytest` (-v for verbose)
-- **Targeted:** `uv run pytest tests/[file].py` or `tests/[file].py::[function]`
-- **Coverage:** `uv run pytest --cov=quiver --cov-report=html`
-
-### Structure
-- **Location:** `tests/` directory.
-- **Mapping:** 1:1 module-to-test file ratio.
-    - `cli.py` -> `test_cli.py` (smoke), `test_create_cli.py` (create integration), `test_extract_cli.py` (extract integration), `test_add_cli.py` (add/upsert integration), `test_embedding.py` (embedding integration).
-    - `archive.py` -> `test_archive.py`.
-    - `utils/__init__.py` -> `test_utils.py`.
-- **Practices:** Use `tmp_path` for FS tests; prioritize critical path coverage.
-- **Test helper directory naming:** Never name a `_make_archive`-style helper's staging directory `src/` when the test fixture also creates subdirectories named `src/` inside it — the packed directory name becomes part of every stored path, so `src/src/main.py` would result. Use a neutral name like `project/` instead.
-- **Path assertions in directory-pack tests:** Stored paths always include the top-level directory name as a prefix (e.g. `project/src/main.py`). Assertions must reflect the full path, not just the filename. When the exact prefix is unknown (e.g. absolute-path single-file adds via CLI), use `endswith()` or `rglob()` rather than equality checks.
-- **Upsert path matching:** The upsert merge compares **full stored paths** (e.g. `mydir/foo.txt`), not just filenames. To trigger an actual upsert in a test, the replacement file must be added from a directory whose name matches the one used in the original `add()` call.
-
+### Tests (`uv run pytest`)
+- **Exec:** `.` (all), `-v` (verbose), `tests/[file].py[::func]` (targeted), `--cov=quiver --cov-report=html` (coverage).
+- **Structure:** `tests/` dir 1:1 mapping (`archive.py`->`test_archive.py`, `utils/__init__.py`->`test_utils.py`). `cli.py` splits to `test_cli.py` (smoke), `test_[create|extract|add]_cli.py`, `test_embedding.py`.
+- **FS Rules:** Prioritize critical paths. Use `tmp_path`. Name staging dirs `project/` (avoids `src/src/` nesting).
+- **Paths:** Stored paths include top-level prefix (`project/src/main.py`). Assert via `endswith()` or `rglob()`.
+- **Upserts:** Merges compare **full stored paths**. Triggers require replacement file added from a dir matching original `add()` root.
 
 ## Tech Stack & Standards
 - **Runtime:** Python 3.12.3
@@ -97,26 +66,23 @@ Run sequence: `uv run ruff format src/ tests/ && uv run ruff check src/ tests/ &
 - **Docs:** `mkdocs` with Material theme
 
 ## Coding Standards
-- **Typing:** Strict `mypy` for `src/` (reliability); relaxed for `tests/` (mocking flexibility).
-- **Type Aliases:** Use the Python 3.12 `type X = ...` keyword syntax. **Never** `X: TypeAlias = ...` — ruff flags it as `UP040`.
-- **Format:** PEP8 enforced via `ruff`; max line length 100 chars.
-- **Testing:** Min. 1 unit test per function; use `tmp_path` for FS tests.
-- **UI vs. Logging:** CLI silent by default.
-    - **structlog:** Internal logs only; enabled via debug flag.
-    - **rich:** User feedback/progress only; enabled via verbose flag.
-    - **Strict Isolation:** Never mix UI output with internal loggers.
+- **Typing:** Strict `mypy` for `src/`; relaxed for `tests/`.
+- **Type Aliases:** Use PEP 695 `type X = ...` (Python 3.12+). **Avoid** `TypeAlias` (ruff `UP040`).
+- **Format:** PEP8 via `ruff`; 100 char limit.
+- **Testing:** ≥1 unit test/function; use `tmp_path` for FS.
+- **UI/Logging:** CLI silent by default. Use `structlog` for internal debug logs and `rich` for verbose user feedback. **Strictly isolate** UI output from internal loggers.
 
-### Import Rules (ruff enforced)
-- **Order:** stdlib → third-party → local (`from quiver...`). One blank line between each group. `ruff` enforces this as `I001`; always run `uv run ruff check --fix` or `uv run ruff format` after adding imports.
-- **No unused imports:** Every import must be referenced in the file. Remove unused imports immediately — ruff flags them as `F401`.
-- **`TYPE_CHECKING` blocks:** Only use `if TYPE_CHECKING:` when there is at least one symbol inside. An empty `if TYPE_CHECKING: pass` block is flagged as `TC005` and must be deleted entirely.
-- **Async-safe I/O (`ASYNC240`):** Inside `async def` functions **never** call blocking `pathlib.Path` methods (`read_text`, `write_text`, `mkdir`, `replace`, `unlink`, etc.) directly. Wrap them with `asyncio.to_thread(path.method, ...)`. Violations are flagged as `ASYNC240`.
-- **Path helpers over `os` (`PTH*`):** Prefer `Path(...).replace(...)` over `os.replace(...)`, `Path(...).unlink()` over `os.remove()`, etc. Ruff flags raw `os` path calls as `PTH105`, `PTH107`, etc. Only import `os` if no `pathlib` equivalent exists.
-- **`contextlib.suppress` over bare `try/except/pass` (`SIM105`):** Use `with contextlib.suppress(SomeError):` instead of a `try: ... except SomeError: pass` block.
+### Import Rules (ruff)
+- **Order (I001):** stdlib → third-party → local. Separate with one blank line. Run `uv run ruff check --fix` or `format` to resolve.
+- **Unused Imports (F401):** Remove immediately; every import must be referenced.
+- **`TYPE_CHECKING` (TC005):** Delete empty `if TYPE_CHECKING: pass` blocks; use only if containing symbols.
+- **Async-safe I/O (ASYNC240):** Never call blocking `pathlib.Path` methods inside `async def`. Wrap with `asyncio.to_thread(path.method, ...)`.
+- **Pathlib over `os` (PTH):** Use `pathlib` equivalents (e.g., `Path.unlink()`) over `os`. Avoid `os` unless no `pathlib` alternative exists.
+- **`contextlib.suppress` (SIM105):** Replace `try: ... except Error: pass` with `with contextlib.suppress(Error):`.
 
-### mypy Rules (strict mode)
-- **Return types:** All functions — including `__exit__` — must have explicit return type annotations.
-- **`__exit__` signature:** Must be typed exactly as:
+### mypy Rules (strict)
+- **Return types:** All functions (including `__exit__`) require explicit annotations.
+- **`__exit__` signature:** Use exact typing:
   ```python
   def __exit__(
       self,
@@ -125,51 +91,56 @@ Run sequence: `uv run ruff format src/ tests/ && uv run ruff check src/ tests/ &
       exc_tb: TracebackType | None,
   ) -> None:
   ```
-  Import `TracebackType` from `types` inside an `if TYPE_CHECKING:` block (or at the top of the file).
-- **lxml types:** `lxml` ships no inline stubs; use `lxml-stubs` (already a dev dependency). When annotating element variables use `etree._Element`; for CDATA use `etree.CDATA(...)`. mypy may still emit false positives for some lxml internals — suppress with `# type: ignore[assignment]` only as a last resort.
-- **`asyncio.to_thread` with methods:** Pass bound methods as the first argument: `asyncio.to_thread(path.read_text, encoding="utf-8")` — not `asyncio.to_thread(lambda: path.read_text(...))`. The lambda form loses the return-type inference.
+  Import `TracebackType` from `types` (use `if TYPE_CHECKING:` if preferred).
+- **lxml types:** Use `lxml-stubs`. Annotate elements as `etree._Element` and CDATA as `etree.CDATA(...)`. Suppress internal false positives with `# type: ignore[assignment]` only when necessary.
+- **`asyncio.to_thread`:** Pass bound methods directly: `asyncio.to_thread(path.read_text, encoding="utf-8")`. Avoid lambdas to preserve return-type inference.
 
 ## Python API
-
-The public API follows the `tarfile` pattern. Entry point: `quiver.open()` in `__init__.py`.
+Public API mirrors `tarfile`. Entry: `quiver.open()`.
 
 ### `QuiverFile` (`src/quiver/archive.py`)
-- Factory: `QuiverFile.open(name, mode, preamble=None, epilogue=None)` or `quiver.open(name, mode, preamble=None, epilogue=None)`
-- Modes: `'r'` (read), `'w'` (write), `'a'` (append)
-- Context manager: calls `close()` on `__exit__`
-- `add(name, arcname=None)` — accepts file or directory input; validates UTF-8 encoding **and** XML-1.0 character compatibility (via `_validate_xml_compatible`), normalizes POSIX paths, upserts entries into `self._entries` (replaces existing entry with same stored path, or appends). When packing a **directory**, the directory's own name is preserved as a path prefix (matching `tar` semantics — e.g. `add("mydir")` stores `mydir/file.txt`, not `file.txt`). Supply `arcname` to override the prefix.
-- Directory packing uses an internal async reader/writer flow with bounded queue backpressure and a single writer task
-- `close()` — in both `'w'` and `'a'` modes: sorts entries, builds lxml XML tree, writes to disk via `_write_archive` (creates or overwrites). **Skipped entirely** (archive untouched) when `close()` is reached via `__exit__` with a propagating exception.
-- `getnames()` / `getmembers()` — return names / `QuiverInfo` objects; works in both read and write mode
-- `extractall(path=".", members=None)` — extracts all (or selected) members to *path* using an async pipeline; validates every path against the destination sandbox before writing; writes `PREAMBLE` and `EPILOGUE` files to *path* when the archive contains non-whitespace surrounding text
+- **Factory**: `QuiverFile.open(name, mode, preamble=None, epilogue=None)`
+- **Modes**: `'r'` (read), `'w'` (write), `'a'` (append).
+- **Context Manager**: Auto-calls `close()`.
+- **`add(name, arcname=None)`**:
+  - Validates UTF-8 & XML-1.0 compatibility.
+  - Normalizes POSIX paths; upserts `self._entries`.
+  - Preserves dir name as prefix (e.g., `add("dir")` -> `dir/file.txt`) unless `arcname` provided.
+  - Uses async reader/writer with bounded backpressure.
+- **`close()`**: Sorts entries, builds `lxml` tree, writes to disk. **Aborts** if `__exit__` has propagating exception.
+- **`getnames()` / `getmembers()`**: Returns names or `QuiverInfo` objects.
+- **`extractall(path=".", members=None)`**:
+  - Async pipeline extraction.
+  - Validates sandbox paths.
+  - Writes `PREAMBLE`/`EPILOGUE` files if non-whitespace text exists.
 
-### `QuiverInfo` (`src/quiver/archive.py`)
-- `name: str` — normalized POSIX path
-- `size: int` — content size in bytes
-- `isfile() -> bool`, `isdir() -> bool`
+### `QuiverInfo`
+- `name: str` (POSIX path), `size: int`.
+- `isfile()`, `isdir()`.
 
 ### Exceptions
-- `BinaryFileError(ValueError)` — raised when a file (a) is not valid UTF-8, **or** (b) is valid UTF-8 but contains XML-1.0-forbidden characters (NULL bytes, C0/C1 control characters other than tab/LF/CR). The error message always includes the file path and, for case (b), up to `_MAX_REPORTED_OFFENCES` (default 5) locations formatted as `line N, col M: \xNN`.
-- `PathTraversalError(ValueError)` — raised when an archive entry path is absolute, contains `..`, or resolves outside the extraction destination
+- **`BinaryFileError`**: Invalid UTF-8 or XML-1.0 forbidden chars (e.g., NULL, C0/C1). Reports up to 5 error locations.
+- **`PathTraversalError`**: Absolute paths, `..`, or escape from destination sandbox.
 
-### `quiver.open()` (`src/quiver/__init__.py`)
-- Top-level factory; delegates to `QuiverFile.open()`
-- Accepts explicit `preamble` and `epilogue` keyword arguments (no `**kwargs` — typed directly)
-- Exports: `open`, `QuiverFile`, `QuiverInfo`, `BinaryFileError`, `PathTraversalError`, `__version__`
+### `quiver.__init__`
+- Exports: `open`, `QuiverFile`, `QuiverInfo`, `BinaryFileError`, `PathTraversalError`, `__version__`.
 
 ## CLI
-Command style mirrors `tar`:
+Style: `tar` (e.g., `quiver -cvf archive.xml src`)
 
-- **Create**: `quiver -cf <archive.xml> <input_path...>` bundles short flags; `-f` must be last in a bundle.
-- **Extract**: `quiver -xf <archive.xml> [destination]` extracts to `destination` (default: `.`).
-- **Add/Upsert**: `quiver -af <archive.xml> <input_path...>` upserts files into an existing archive (insert new, replace existing, preserve alphabetical order). If the archive does not yet exist, it is created from scratch.
-- **Verbose**: include `-v` (e.g., `quiver -cvf archive.xml src docs`).
-- **Debug logging**: `--debug` (no short form).
-- **Preamble**: `--preamble <text_or_filepath>` — prepends text before the XML. If the argument is an existing file path, its contents are used; otherwise treated as a raw string.
-- **Epilogue**: `--epilogue <text_or_filepath>` — appends text after the XML. Same filepath-or-string resolution as `--preamble`.
-- Inputs after the archive path are packed recursively for `-c` and `-a`; for `-x` the first positional arg is the destination.
-- Silent by default—no stdout unless `-v` or `--debug` is supplied.
-- **Validation**: Mode flags (`-c`, `-x`, `-a`) are mutually exclusive; exactly one is required.
+- **-c (Create)**: `quiver -cf <archive.xml> <path...>`
+- **-x (Extract)**: `quiver -xf <archive.xml> [dest]` (default: `.`)
+- **-a (Add/Upsert)**: `quiver -af <archive.xml> <path...>` New/replace; maintains alpha-order. Creates if missing.
+- **-v (Verbose)**: Enables stdout.
+- **--debug**: Detailed logging (no short flag).
+- **--preamble <txt|file>**: Prepend string or file content before XML.
+- **--epilogue <txt|file>**: Append string or file content after XML.
+
+**Rules:**
+- Flags: `-f` must end short-flag bundles.
+- Validation: Exactly one mode (`-c`, `-x`, `-a`) required; mutually exclusive.
+- Recursion: Recursive packing for `-c`/`-a`.
+- Output: Silent by default unless `-v` or `--debug`.
 
 ## Logging & UI (`src/quiver/logging.py`)
 - `configure_debug_logging(enabled)`: Configures `structlog`. Use `logging.CRITICAL` (50) for no-op. **Avoid `logging.CRITICAL + 1`** (causes `KeyError`).
@@ -178,14 +149,6 @@ Command style mirrors `tar`:
 ### structlog Rules
 - **Init**: Use `structlog.get_logger(__name__)`. **Never** `logging.getLogger()`.
 - **Context**: Use kwargs: `logger.debug("msg", k=v)`. **Never** `extra={...}` (crashes on reserved keys like `name`).
-- **Processors (PrintLoggerFactory)**:
-  ```python
-  processors=[
-      structlog.processors.add_log_level,
-      structlog.processors.StackInfoRenderer(),
-      structlog.dev.ConsoleRenderer(),
-  ]
-
 
 ### Established log fields in `archive.py`
 | Call site                         | Fields                   |
@@ -195,33 +158,26 @@ Command style mirrors `tar`:
 | `QuiverFile.close`                | `archive_name=`          |
 | `_ExtractPipeline._writer_worker` | `entry_path=`, `size=`   |
 
-# Architecture & Mechanisms
-- **CLI:** Single Click command; emulates tar-style bundled short flags (`-cvf`) via custom pre-processing expansion.
-- **Concurrency/OOM:** Asyncio/threading with size-limited queues (Reader/Writer pattern) for backpressure; chunk-stream large files to prevent OOM.
-- **Single Writer:** One dedicated task handles XML output for determinism, Git-friendliness, and deadlock prevention.
-- **Normalization:** POSIX paths (forward slashes) only; file entries sorted alphabetically in XML by **full stored path** (not just filename). When packing a directory, its own name is prepended as the path prefix — `add("mydir")` stores `mydir/file.txt`, not `file.txt`. This matches `tar` semantics and ensures extraction recreates the original directory structure. The `arcname` parameter overrides the prefix. The edge case `Path(".").name == ""` is handled by falling back to `Path(".").resolve().name`.
-- **Security:** UTF-8 text only; sandbox unpacking; abort on absolute paths or traversal (`../`) attempts. `_validate_extraction_path()` (Layer 1) performs pre-resolution rejection of absolute paths and `..` components, then confirms the resolved path is inside the destination with `Path.relative_to()`.
-- **Content validation (Layer 2):** File content goes through two sequential checks inside `_read_text_file()` / `_read_text_file_async()` before it is stored:
-  1. `_decode_utf8()` — rejects non-UTF-8 bytes → `BinaryFileError`.
-  2. `_validate_xml_compatible()` — rejects XML-1.0-forbidden characters (matched by `_XML_FORBIDDEN_RE`: `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]`) → `BinaryFileError` with line/col/hex location info (up to `_MAX_REPORTED_OFFENCES = 5` occurrences). This prevents a late crash inside `lxml.etree.CDATA()` at serialization time with no useful context.
-- **Extraction Pipeline (`_ExtractPipeline`, Layer 3.5):** Mirrors `_PackPipeline`. Feeds `(stored_path, content)` pairs through a bounded `asyncio.Queue`; concurrent worker tasks validate, create parent dirs via `asyncio.to_thread`, and write files with `aiofile`. XML parsing uses `lxml.etree.fromstring` on the isolated XML block (not the full file).
-- **`__exit__` exception-propagation rule:** `QuiverFile.__exit__` checks `exc_type is not None` and, if so, sets `self._closed = True` without calling `close()`. This guarantees that a failed `add()` call inside a `with` block never triggers a write that would corrupt or silently truncate the archive. This is the same contract as `tarfile.TarFile`.
-- **Read/append mode (`QuiverFile.__init__`):** Opening in `'r'` immediately parses the archive via `_parse_archive()` and populates `self._entries`, `self._preamble`, and `self._epilogue`; raises `FileNotFoundError` if the file does not exist. Opening in `'a'` does the same when the file exists; starts with empty `self._entries` when it does not (creating a new archive on `close()`).
-- **Upsert semantics (mode `'a'`):** There is no separate upsert pipeline. `_parse_archive()` pre-loads the existing entries into `self._entries` on open. Each `add()` call performs an in-place replace when the stored path already exists, or appends otherwise. `close()` calls `_write_archive()` identically to `'w'` mode. This works because all file content must be in RAM anyway to serve `getnames()`, `getmembers()`, and `extractall()` — a streaming merge would save zero memory. **Avoid re-introducing a separate upsert pipeline;** the complexity is not justified.
-- **Embedded archive (preamble/epilogue):** The archive file may contain arbitrary plain text before and after the `<archive>` block. `_split_archive_text()` locates the **first** `<archive ...>` and first `</archive>` to isolate the XML; everything outside is preamble/epilogue. The **first-match rule** means any subsequent `<archive>` blocks are treated as pure epilogue text, never parsed as XML.
-- **XML Specs:** File content must use unescaped `<![CDATA[ ... ]]>` blocks; no entity encoding for bodies.
-  - `<directory_tree>` is always the **first child** of `<archive>`, placed before all `<file>` elements.
-  - `<directory_tree>` content is also CDATA-wrapped (`"\n" + tree_text + "\n"`) for consistency and to future-proof against special characters in filenames.
-  - An empty archive renders `<directory_tree>` containing just `"."`.)
-- **Sentinel constants (`_PREAMBLE_SENTINEL`, `_EPILOGUE_SENTINEL`):** Defined in Layer 0 of `archive.py`. Written at the preamble→XML and XML→epilogue seams so boundaries are deterministic and round-trippable. Currently `_PREAMBLE_SENTINEL = "\n"` (ensures `<archive>` starts on its own line); `_EPILOGUE_SENTINEL = ""` (lxml's own trailing `\n` already provides the separator). Changing the values requires updating `_write_archive`, `_split_archive_text`, and the sentinel unit tests.
-- **lxml `pretty_print` trailing newline:** `etree.tostring(..., pretty_print=True)` **always** appends a `\n` after the closing tag. This `\n` appears at the **start of the epilogue slice** in `_split_archive_text` (it is outside `</archive>`, not inside `xml_content`). `_split_archive_text` strips exactly one leading `\n` from the epilogue unconditionally to absorb this artifact and ensure verbatim round-trip. Do not add logic that assumes `xml_content` ends with `\n` — it ends with `>`.
+## Architecture & Mechanisms
+- **CLI:** Tar-style bundled flags (`-cvf`) via custom pre-processing.
+- **Concurrency/OOM:** Asyncio/threading, bounded Reader/Writer queues, chunk-streaming large files.
+- **Single Writer:** Dedicated task for XML output ensures determinism, Git-friendliness, & prevents deadlocks.
+- **Normalization:** POSIX paths. Entries sorted alphabetically in XML by *full stored path*. Tar semantics: `add("mydir")` prepends dir (`mydir/file.txt`); `arcname` overrides. Edge case `Path(".").name == ""` uses `.resolve().name`.
+- **Security (L1):** Sandboxed unpack. `_validate_extraction_path()` rejects absolute & `../` pre-resolution; validates inside dest via `Path.relative_to()`.
+- **Content Validation (L2):** Checks inside `_read_text_file[_async]()` raise `BinaryFileError`: 1) `_decode_utf8()` (rejects non-UTF-8). 2) `_validate_xml_compatible()` (rejects `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x80-\x9F]`, max 5 errors reported) preventing late `lxml` serialization crash.
+- **Extraction (`_ExtractPipeline`, L3.5):** Bounded `asyncio.Queue` streams `(path, content)` to concurrent workers that validate, create dirs (`to_thread`), and write (`aiofile`). Isolated XML parsed via `lxml.etree.fromstring`.
+- **Transactions (`__exit__`):** If `exc_type` exists, `QuiverFile.__exit__` sets `self._closed = True` without `close()`. Prevents corrupt/truncated archive on failed `add()` (matches `tarfile`).
+- **Modes ('r'/'a') & Upsert:** Open `'r'` or `'a'` parses archive (`_parse_archive()`), populating `_entries`, `_preamble`, `_epilogue` (`'r'` raises `FileNotFoundError` if missing). Upserts are in-RAM replace/append via `add()`; `close()` behaves like `'w'` mode. *Do not re-introduce separate upsert pipeline.*
+- **Embedded Text & Sentinels (L0):** `_split_archive_text()` isolates *first* `<archive>`...`</archive>`; rest is preamble/epilogue (first-match rule). `_PREAMBLE_SENTINEL = "\n"`, `_EPILOGUE_SENTINEL = ""`. Sync required if changed.
+- **XML Specs:** Unescaped `<![CDATA[...]]>`, no entity encoding. `<directory_tree>` is first child, CDATA-wrapped (`"\n" + tree_text + "\n"`), `"."` if empty.
+- **lxml Artifact:** `pretty_print=True` appends `\n` after closing tag. `_split_archive_text` unconditionally strips exactly 1 leading `\n` from epilogue for verbatim round-trip. `xml_content` ends with `>`, not `\n`.
+
 
 ## Docstring Rules
 - **Format:** Google Style (`Args:`, `Returns:`, `Raises:`).
-- **Markup:** Markdown ONLY. NO reST/Sphinx directives (`:class:`, `:func:`, `:exc:`, `::`).
-- **Code:** Single backticks for inline (`` `x` ``). Triple backticks for blocks (````python````).
-- **Links:** Use MkDocs autorefs: `[MyClass][]` or `[func][module.func]`.
-- **Types:** Rely on Python type hints in the signature. Do not duplicate types in docstrings.
+- **Markup:** Markdown ONLY; NO reST/Sphinx directives (`:class:`, etc.).
+- **Code/Links:** Backticks (single inline, triple block). MkDocs autorefs (`[MyClass][]`).
+- **Types:** Rely on Python type hints; do not duplicate in docstrings.
 - **Style:** PEP 257 imperative mood ("Return X", not "Returns X").
-- **Length:** Use pure one-liners (`"""Do X."""`) for simple, private, or trivial functions. Use multi-line (summary, blank line, sections) ONLY for complex or public APIs. Do not force `Args:`/`Returns:` if the function is self-explanatory.
-- **Staleness:** When implementing a previously scaffolded method (e.g., one that raised `NotImplementedError`), always update its docstring, any inline section comments, and the class-level `Supported modes:` block to reflect the new behaviour. Treat stale "not yet implemented" language anywhere in the codebase as a bug.
+- **Length:** One-liners for simple/private. Multi-line/sections ONLY for complex/public APIs. Omit redundant `Args:`/`Returns:`.
+- **Staleness:** Always update docstrings, inline comments, and class `Supported modes:` when implementing scaffolds. Treat stale "not yet implemented" text as a bug.
