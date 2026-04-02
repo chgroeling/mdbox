@@ -19,6 +19,7 @@ import asyncio
 import re
 import time
 import warnings
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -279,7 +280,7 @@ def _split_archive_bytes(raw: bytes) -> tuple[str, bytes, str, int]:
     return preamble, xml_bytes, epilogue, xml_start
 
 
-type _ParsedEntry = tuple[str, int, int, int]
+type _ParsedEntry = tuple[str, int, int]
 type _ParseResult = tuple[list[_ParsedEntry], str, str]
 
 
@@ -291,6 +292,55 @@ def _read_content_at(archive_path: Path, offset: int, length: int) -> str:
         raw_bytes = fp.read(length)
     text = raw_bytes.decode("utf-8")
     return _unescape_cdata(text)
+
+
+async def _read_content_at_async(archive_path: Path, offset: int, length: int) -> str:
+    """Async counterpart to `_read_content_at` that owns its file handle."""
+
+    async with async_open(archive_path, "rb") as afp:
+        afp.seek(offset)
+        raw_bytes = await afp.read(length)
+    text = raw_bytes.decode("utf-8")
+    return _unescape_cdata(text)
+
+
+class _AsyncArchiveContentReader:
+    """Keep a single async file handle open for random-access archive reads."""
+
+    def __init__(self, archive_path: Path) -> None:
+        self._archive_path = archive_path
+        self._context_manager = None
+        self._file = None
+        self._lock: asyncio.Lock | None = None
+
+    async def __aenter__(self) -> _AsyncArchiveContentReader:
+        self._context_manager = async_open(self._archive_path, "rb")
+        self._file = await self._context_manager.__aenter__()
+        self._lock = asyncio.Lock()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        try:
+            if self._context_manager is not None:
+                await self._context_manager.__aexit__(exc_type, exc, tb)
+        finally:
+            self._context_manager = None
+            self._file = None
+            self._lock = None
+
+    async def read(self, offset: int, length: int) -> str:
+        if self._file is None or self._lock is None:
+            raise RuntimeError("Archive reader is not active.")
+        async with self._lock:
+            self._file.seek(offset)
+            raw_bytes = await self._file.read(length)
+        text = raw_bytes.decode("utf-8")
+        return _unescape_cdata(text)
 
 
 # Matches a single <file path="...">…</file> block in bytes form.
@@ -327,7 +377,7 @@ def _parse_archive(archive_path: str) -> _ParseResult:
 
     Returns:
         A tuple of ``(entries, preamble, epilogue)`` where *entries* is a list
-        of ``(stored_path, size, byte_offset, byte_length)`` tuples in document
+        of ``(stored_path, length, byte_offset)`` tuples in document
         order; *preamble* is the raw text before the first ``<archive>`` tag;
         *epilogue* is the raw text after the first ``</archive>`` tag.
 
@@ -343,13 +393,10 @@ def _parse_archive(archive_path: str) -> _ParseResult:
         stored_path = match.group(1).decode("utf-8")
         content_group = 2 if match.group(2) is not None else 3
         raw_content_bytes = match.group(content_group) or b""
-        raw_content_text = raw_content_bytes.decode("utf-8")
-        unescaped = _unescape_cdata(raw_content_text)
-        size = len(unescaped.encode("utf-8"))
-        local_start, local_end = match.span(content_group)
+        byte_length = len(raw_content_bytes)
+        local_start, _ = match.span(content_group)
         byte_start = xml_start + local_start
-        byte_length = local_end - local_start
-        entries.append((stored_path, size, byte_start, byte_length))
+        entries.append((stored_path, byte_length, byte_start))
 
     return entries, preamble, epilogue
 
@@ -359,26 +406,40 @@ def _parse_archive(archive_path: str) -> _ParseResult:
 # ===========================================================================
 
 
+type _ContentReader = Callable[["QuiverInfo"], Awaitable[str]]
+
+
 class _ExtractPipeline:
     """Bounded-queue async pipeline that writes extracted files to disk.
 
     File writing is fully asynchronous via `aiofile`.
 
     Args:
-        entries: List of `(stored_path, content)` pairs to extract.
+        entries: List of archive members to extract.
         destination: Resolved absolute path of the extraction root directory.
+        content_reader: Awaitable callable that returns text content for a member.
     """
 
-    def __init__(self, entries: list[tuple[str, str]], destination: Path) -> None:
+    def __init__(
+        self,
+        entries: list[QuiverInfo],
+        destination: Path,
+        *,
+        content_reader: _ContentReader,
+    ) -> None:
         self._entries = entries
         self._destination = destination
+        self._content_reader = content_reader
 
-    def run(self) -> None:
-        """Execute the pipeline synchronously."""
+    async def run_async(self) -> None:
+        """Execute the pipeline inside an existing event loop."""
+        if not self._entries:
+            return
+
         t0 = time.perf_counter()
-        asyncio.run(self._run_async())
+        await self._run_async()
         elapsed = time.perf_counter() - t0
-        total_bytes = sum(len(c.encode("utf-8")) for _, c in self._entries)
+        total_bytes = sum(info.length for info in self._entries)
         logger.debug(
             "Extract pipeline completed",
             elapsed_s=round(elapsed, 4),
@@ -386,13 +447,14 @@ class _ExtractPipeline:
             total_bytes=total_bytes,
         )
 
+    def run(self) -> None:
+        """Execute the pipeline with its own event loop."""
+        asyncio.run(self.run_async())
+
     async def _run_async(self) -> None:
         """Feed entries into a bounded queue and run concurrent writer workers."""
-        if not self._entries:
-            return
-
         worker_count = min(MAX_DIRECTORY_READERS, len(self._entries))
-        work_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
+        work_queue: asyncio.Queue[QuiverInfo | None] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
 
         producer_task = asyncio.create_task(self._producer(work_queue, worker_count))
         worker_tasks = [
@@ -410,7 +472,7 @@ class _ExtractPipeline:
 
     async def _producer(
         self,
-        work_queue: asyncio.Queue[tuple[str, str] | None],
+        work_queue: asyncio.Queue[QuiverInfo | None],
         worker_count: int,
     ) -> None:
         """Feed all entries into *work_queue*, then send sentinel values."""
@@ -421,22 +483,24 @@ class _ExtractPipeline:
 
     async def _writer_worker(
         self,
-        work_queue: asyncio.Queue[tuple[str, str] | None],
+        work_queue: asyncio.Queue[QuiverInfo | None],
     ) -> None:
         """Consume entries from *work_queue* and write each to disk."""
         while True:
             item = await work_queue.get()
             if item is None:
                 return
-            stored_path, content = item
-            target = _validate_extraction_path(stored_path, self._destination)
+            info = item
+            content = await self._content_reader(info)
+            target = _validate_extraction_path(info.name, self._destination)
             await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
             async with async_open(target, "w", encoding="utf-8") as afp:
                 await afp.write(content)
+            size_bytes = len(content.encode("utf-8"))
             logger.debug(
                 "Extracted file",
-                entry_path=stored_path,
-                size=len(content.encode("utf-8")),
+                entry_path=info.name,
+                size=size_bytes,
             )
 
 
@@ -462,6 +526,14 @@ def _escape_cdata(content: str) -> str:
     return content.replace("]]>", "]]]]><![CDATA[>")
 
 
+def _payload_length_for_text(content: str) -> int:
+    """Return the byte length of *content* once embedded inside CDATA."""
+
+    escaped = _escape_cdata(content)
+    # `_escape_cdata` only inserts ASCII characters, so len(str) == len(bytes).
+    return len(escaped)
+
+
 # ===========================================================================
 # Layer 5 — Public API
 # ===========================================================================
@@ -472,21 +544,19 @@ class QuiverInfo:
 
     Attributes:
         name: Normalized POSIX path of the file.
-        size: Size of the (unescaped) file content in bytes.
+        length: Payload length in bytes as stored inside the archive.
     """
 
     def __init__(
         self,
         name: str,
-        size: int,
+        length: int,
         *,
         _offset: int | None = None,
-        _length: int | None = None,
     ) -> None:
         self.name = name
-        self.size = size
+        self.length = length
         self._offset = _offset
-        self._length = _length
 
     def isfile(self) -> bool:
         """Return True — all current quiver entries are files."""
@@ -497,7 +567,7 @@ class QuiverInfo:
         return False
 
     def __repr__(self) -> str:
-        return f"QuiverInfo(name={self.name!r}, size={self.size})"
+        return f"QuiverInfo(name={self.name!r}, length={self.length})"
 
 
 class QuiverFile:
@@ -545,6 +615,7 @@ class QuiverFile:
         self._preamble: str | None = preamble
         self._epilogue: str | None = epilogue
         self._archive_path: Path | None = None
+        self._async_reader: _AsyncArchiveContentReader | None = None
         logger.debug("QuiverFile opened", archive_name=name, mode=mode)
 
         if mode == "r":
@@ -556,12 +627,11 @@ class QuiverFile:
             self._preamble = parsed_preamble if parsed_preamble.strip() else None
             self._epilogue = parsed_epilogue if parsed_epilogue.strip() else None
             self._archive_path = archive_path
-            for stored_path, size, byte_offset, byte_length in raw_entries:
+            for stored_path, payload_length, byte_offset in raw_entries:
                 info = QuiverInfo(
                     name=stored_path,
-                    size=size,
+                    length=payload_length,
                     _offset=byte_offset,
-                    _length=byte_length,
                 )
                 self._members.append(info)
                 self._member_map[stored_path] = info
@@ -667,16 +737,16 @@ class QuiverFile:
             for child in _collect_directory_files(resolved_root):
                 relative = child.relative_to(resolved_root)
                 stored_path = _directory_stored_path(relative=relative, arcname=effective_arcname)
-                size = child.stat().st_size
-                info = QuiverInfo(name=stored_path, size=size)
+                length = child.stat().st_size
+                info = QuiverInfo(name=stored_path, length=length)
                 self._register_source_entry(info, child)
             return
 
         stored_path = (
             _normalize_stored_path(arcname) if arcname is not None else _normalize_path(file_path)
         )
-        size = resolved_path.stat().st_size
-        info = QuiverInfo(name=stored_path, size=size)
+        length = resolved_path.stat().st_size
+        info = QuiverInfo(name=stored_path, length=length)
         self._register_source_entry(info, resolved_path)
 
     def writestr(self, arcname: str, content: str) -> None:
@@ -716,9 +786,9 @@ class QuiverFile:
         _validate_xml_compatible(content, arcname)
 
         stored_path = _normalize_stored_path(arcname)
-        info = QuiverInfo(name=stored_path, size=len(content.encode("utf-8")))
+        info = QuiverInfo(name=stored_path, length=len(content.encode("utf-8")))
         self._cache_entry(info, content)
-        logger.debug("Added data", entry_path=stored_path, size=info.size)
+        logger.debug("Added data", entry_path=stored_path, length_bytes=info.length)
 
     def add_text(self, arcname: str, content: str) -> None:
         """Backward-compatible alias for `writestr`.
@@ -787,10 +857,10 @@ class QuiverFile:
             except ValueError as exc:  # pragma: no cover - defensive
                 raise KeyError(target.name) from exc
 
-        if target._offset is None or target._length is None or self._archive_path is None:
+        if target._offset is None or self._archive_path is None:
             raise KeyError(target.name)
 
-        content = _read_content_at(self._archive_path, target._offset, target._length)
+        content = _read_content_at(self._archive_path, target._offset, target.length)
         return content
 
     def __iter__(self) -> Iterator[QuiverInfo]:
@@ -845,14 +915,50 @@ class QuiverFile:
         allowed_names: set[str] | None = (
             {info.name for info in members} if members is not None else None
         )
-        entries: list[tuple[str, str]] = []
+        entries: list[QuiverInfo] = []
         for info in self._members:
             if allowed_names is not None and info.name not in allowed_names:
                 continue
-            entries.append((info.name, self.read(info)))
+            entries.append(info)
 
-        _ExtractPipeline(entries=entries, destination=destination).run()
+        pipeline = _ExtractPipeline(
+            entries=entries,
+            destination=destination,
+            content_reader=self._read_member_async,
+        )
+
+        async def _execute_pipeline() -> None:
+            if self._archive_path is None:
+                await pipeline.run_async()
+                return
+            previous_reader = self._async_reader
+            async with _AsyncArchiveContentReader(self._archive_path) as reader:
+                self._async_reader = reader
+                try:
+                    await pipeline.run_async()
+                finally:
+                    self._async_reader = previous_reader
+
+        asyncio.run(_execute_pipeline())
         self._write_surrounding_text(destination)
+
+    async def _read_member_async(self, info: QuiverInfo) -> str:
+        """Return archive content for *info* using asynchronous disk I/O."""
+
+        cached = self._content_cache.get(info.name)
+        if cached is not None:
+            return cached
+
+        if self._mode == "w":
+            return await asyncio.to_thread(self._get_entry_content, info.name)
+
+        if info._offset is None or self._archive_path is None:
+            raise KeyError(info.name)
+
+        if self._async_reader is not None:
+            return await self._async_reader.read(info._offset, info.length)
+
+        return await _read_content_at_async(self._archive_path, info._offset, info.length)
 
     def _write_surrounding_text(self, destination: Path) -> None:
         """Write `PREAMBLE` and `EPILOGUE` files to *destination* if present.
@@ -899,6 +1005,7 @@ class QuiverFile:
         stored_info = self._upsert_member(info)
         self._content_cache[stored_info.name] = content
         self._source_map.pop(stored_info.name, None)
+        stored_info.length = _payload_length_for_text(content)
 
     def _register_source_entry(self, info: QuiverInfo, source: Path) -> None:
         """Register a disk-backed entry that can be read lazily later."""
@@ -906,19 +1013,17 @@ class QuiverFile:
         stored_info = self._upsert_member(info)
         self._source_map[stored_info.name] = source
         self._content_cache.pop(stored_info.name, None)
-        logger.debug("Added file", entry_path=stored_info.name, size=stored_info.size)
+        logger.debug("Added file", entry_path=stored_info.name, length_bytes=stored_info.length)
 
     def _upsert_member(self, info: QuiverInfo) -> QuiverInfo:
         info._offset = None
-        info._length = None
         existing = self._member_map.get(info.name)
         if existing is None:
             self._members.append(info)
             self._member_map[info.name] = info
             return info
-        existing.size = info.size
+        existing.length = info.length
         existing._offset = None
-        existing._length = None
         return existing
 
     def _get_entry_content(self, name: str) -> str:
@@ -935,7 +1040,7 @@ class QuiverFile:
         content = _read_text_file(source)
         self._content_cache[name] = content
         info = self._member_map[name]
-        info.size = len(content.encode("utf-8"))
+        info.length = _payload_length_for_text(content)
         return content
 
     def _write_archive_stream(self) -> None:

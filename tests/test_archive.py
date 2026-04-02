@@ -8,6 +8,7 @@ import pytest
 from lxml import etree
 
 import quiver
+import quiver.archive as archive_module
 from quiver.archive import BinaryFileError, QuiverFile, QuiverInfo
 
 if TYPE_CHECKING:
@@ -19,17 +20,17 @@ if TYPE_CHECKING:
 
 
 def test_quiverinfo_isfile() -> None:
-    info = QuiverInfo(name="hello.txt", size=42)
+    info = QuiverInfo(name="hello.txt", length=42)
     assert info.isfile() is True
 
 
 def test_quiverinfo_isdir() -> None:
-    info = QuiverInfo(name="hello.txt", size=42)
+    info = QuiverInfo(name="hello.txt", length=42)
     assert info.isdir() is False
 
 
 def test_quiverinfo_repr() -> None:
-    info = QuiverInfo(name="foo.txt", size=10)
+    info = QuiverInfo(name="foo.txt", length=10)
     assert "foo.txt" in repr(info)
     assert "10" in repr(info)
 
@@ -392,7 +393,7 @@ def test_infolist_returns_quiverinfo_objects(tmp_path: Path) -> None:
     assert len(members) == 1
     assert isinstance(members[0], QuiverInfo)
     assert members[0].name.endswith("sample.txt")
-    assert members[0].size == len(b"hello")
+    assert members[0].length == len(b"hello")
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +484,37 @@ def test_extractall_in_write_mode_raises(tmp_path: Path) -> None:
     archive = tmp_path / "archive.xml"
     with QuiverFile.open(str(archive), mode="w") as qf, pytest.raises(ValueError, match="mode"):
         qf.extractall()
+
+
+def test_extractall_reads_content_via_async_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """extractall() streams archive content through the async reader."""
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("alpha", encoding="utf-8")
+    (src / "b.txt").write_text("beta", encoding="utf-8")
+
+    archive = tmp_path / "archive.xml"
+    with QuiverFile.open(str(archive), mode="w") as qf:
+        qf.write(str(src))
+
+    call_count = 0
+    original_async_read = archive_module._AsyncArchiveContentReader.read
+
+    async def tracking_async_read(self, offset: int, length: int) -> str:  # type: ignore[override]
+        nonlocal call_count
+        call_count += 1
+        return await original_async_read(self, offset, length)
+
+    monkeypatch.setattr(archive_module._AsyncArchiveContentReader, "read", tracking_async_read)
+
+    dest = tmp_path / "out"
+    with QuiverFile.open(str(archive), mode="r") as qf:
+        qf.extractall(path=str(dest))
+
+    assert call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +610,7 @@ def test_infolist_read_mode(tmp_path: Path) -> None:
         members = qf.infolist()
     assert len(members) == 1
     assert isinstance(members[0], QuiverInfo)
-    assert members[0].size == len(b"hello")
+    assert members[0].length == len(b"hello")
 
 
 def test_open_read_mode_missing_archive_raises(tmp_path: Path) -> None:
@@ -865,7 +897,7 @@ def test_writestr_inserts_entry(tmp_path: Path) -> None:
         assert "notes.txt" in qf.namelist()
         assert qf.read("notes.txt") == "some notes"
         info = qf.infolist()[0]
-        assert info.size == len(b"some notes")
+        assert info.length == len(b"some notes")
 
 
 def test_writestr_upserts_existing_entry(tmp_path: Path) -> None:
