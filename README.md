@@ -8,11 +8,9 @@
 
 ## Overview
 
-Quiver is a high-performance Python utility that bundles text file directories into a structured archive format. The output is a plain text file with an embedded XML block — readable by humans, diffable by Git, and parseable by any XML tool. Each archive embeds a visual directory tree and stores file contents in CDATA sections, making the format self-documenting and machine-friendly. It provides a `zipfile`-like Python API and a `tar`-style CLI for creating, extracting, modifying, and deleting archive entries.
+Quiver bundles text file directories into a plain text archive with an embedded XML block. It provides a `zipfile`-like Python API and a `tar`-style CLI for creating, extracting, modifying, and deleting entries. Each archive embeds a visual directory tree and stores file contents in CDATA sections — Git-friendly and parseable by any XML tool.
 
-**Designed for LLM pipelines.** Quiver archives are ideal for feeding codebases, documentation sets, and structured text collections into LLM context windows. The XML format provides explicit file boundaries, the embedded directory tree gives models immediate structural awareness, and CDATA-wrapped content preserves all characters without entity encoding — eliminating the ambiguity that plagues concatenated text prompts.
-
-The **preamble** and **epilogue** sections — arbitrary text blocks before and after the XML — are perfect for injecting system prompts, instructions, or metadata directly into the archive file. A single archive becomes a self-contained prompt + context bundle, ready to be fed to any LLM.
+**Designed for LLM pipelines.** The preamble and epilogue — arbitrary text before and after the XML — are ideal for system prompts and instructions. A single archive becomes a self-contained prompt + context bundle ready for any LLM.
 
 ## Features
 
