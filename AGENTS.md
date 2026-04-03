@@ -108,7 +108,7 @@ Public API mirrors `zipfile`. Entry: `quiver.open()`.
   - Validates UTF-8 & XML-1.0 compatibility.
   - Normalizes POSIX paths; upserts in-memory metadata/content caches.
   - Preserves dir name as prefix (e.g., `write("dir")` -> `dir/file.txt`) unless `arcname` provided.
-  - Uses async reader/writer with bounded backpressure.
+  - Caches file text so serialization can stream without re-reading the filesystem.
 - **`writestr(arcname, content)`**:
   - Inserts an in-memory string as an archive entry (upserts by `arcname`).
   - Requires mode `'w'`. Useful for repack workflows.
@@ -116,9 +116,11 @@ Public API mirrors `zipfile`. Entry: `quiver.open()`.
 - **`close()`**: Sorts entries, builds XML, writes to disk. **Aborts** if `__exit__` has propagating exception.
 - **`namelist()` / `infolist()`**: Zipfile-style metadata accessors (names or `QuiverInfo` objects).
 - **`read(member)`**: Returns text content for a stored path or `QuiverInfo`. Lazily seeks/reads from disk in `'r'` mode; uses in-memory cache in `'w'` mode.
+- **`read(member)`**: Returns text content for a stored path or `QuiverInfo`. Slices the cached archive memoryview in `'r'` mode; uses in-memory cache in `'w'` mode.
 - **Iteration**: `for info in QuiverFile:` yields `QuiverInfo` objects (no content) matching `zipfile.ZipFile` semantics.
 - **`extractall(path=".", members=None)`**:
-  - Async pipeline extraction.
+  - Async pipeline extraction with partitioned async writers.
+  - Reads entry payloads from the cached archive memoryview; only writes hit the filesystem.
   - Validates sandbox paths.
   - Writes `PREAMBLE`/`EPILOGUE` files if non-whitespace text exists.
 

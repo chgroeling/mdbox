@@ -41,7 +41,6 @@ logger = structlog.get_logger(__name__)
 VALID_MODES = frozenset({"r", "w"})
 ARCHIVE_VERSION = "1.0"
 MAX_DIRECTORY_READERS = 8
-QUEUE_MAXSIZE = 64
 
 # Sentinels written at the preamble→XML and XML→epilogue seams.
 # Defined as constants so the marker can be changed in one place.
@@ -281,66 +280,15 @@ def _split_archive_bytes(raw: bytes) -> tuple[str, bytes, str, int]:
 
 
 type _ParsedEntry = tuple[str, int, int]
-type _ParseResult = tuple[list[_ParsedEntry], str, str]
+type _ParseResult = tuple[list[_ParsedEntry], str, str, memoryview]
 
 
-def _read_content_at(archive_path: Path, offset: int, length: int) -> str:
-    """Read and unescape raw content stored at *offset* within *archive_path*."""
+def _read_content_from_buffer(buffer: memoryview, offset: int, length: int) -> str:
+    """Decode and unescape a slice from *buffer* at *offset* of *length*."""
 
-    with archive_path.open("rb") as fp:
-        fp.seek(offset)
-        raw_bytes = fp.read(length)
-    text = raw_bytes.decode("utf-8")
+    raw_slice = buffer[offset : offset + length]
+    text = str(raw_slice, "utf-8")
     return _unescape_cdata(text)
-
-
-async def _read_content_at_async(archive_path: Path, offset: int, length: int) -> str:
-    """Async counterpart to `_read_content_at` that owns its file handle."""
-
-    async with async_open(archive_path, "rb") as afp:
-        afp.seek(offset)
-        raw_bytes = await afp.read(length)
-    text = raw_bytes.decode("utf-8")
-    return _unescape_cdata(text)
-
-
-class _AsyncArchiveContentReader:
-    """Keep a single async file handle open for random-access archive reads."""
-
-    def __init__(self, archive_path: Path) -> None:
-        self._archive_path = archive_path
-        self._context_manager = None
-        self._file = None
-        self._lock: asyncio.Lock | None = None
-
-    async def __aenter__(self) -> _AsyncArchiveContentReader:
-        self._context_manager = async_open(self._archive_path, "rb")
-        self._file = await self._context_manager.__aenter__()
-        self._lock = asyncio.Lock()
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        try:
-            if self._context_manager is not None:
-                await self._context_manager.__aexit__(exc_type, exc, tb)
-        finally:
-            self._context_manager = None
-            self._file = None
-            self._lock = None
-
-    async def read(self, offset: int, length: int) -> str:
-        if self._file is None or self._lock is None:
-            raise RuntimeError("Archive reader is not active.")
-        async with self._lock:
-            self._file.seek(offset)
-            raw_bytes = await self._file.read(length)
-        text = raw_bytes.decode("utf-8")
-        return _unescape_cdata(text)
 
 
 # Matches a single <file path="...">…</file> block in bytes form.
@@ -376,10 +324,11 @@ def _parse_archive(archive_path: str) -> _ParseResult:
         archive_path: Filesystem path to the quiver XML archive.
 
     Returns:
-        A tuple of ``(entries, preamble, epilogue)`` where *entries* is a list
-        of ``(stored_path, length, byte_offset)`` tuples in document
+        A tuple of ``(entries, preamble, epilogue, raw_bytes_view)`` where *entries*
+        is a list of ``(stored_path, length, byte_offset)`` tuples in document
         order; *preamble* is the raw text before the first ``<archive>`` tag;
-        *epilogue* is the raw text after the first ``</archive>`` tag.
+        *epilogue* is the raw text after the first ``</archive>`` tag; and
+        *raw_bytes_view* is a read-only :class:`memoryview` of the entire archive.
 
     Raises:
         FileNotFoundError: If *archive_path* does not exist.
@@ -398,7 +347,7 @@ def _parse_archive(archive_path: str) -> _ParseResult:
         byte_start = xml_start + local_start
         entries.append((stored_path, byte_length, byte_start))
 
-    return entries, preamble, epilogue
+    return entries, preamble, epilogue, memoryview(raw_bytes)
 
 
 # ===========================================================================
@@ -410,9 +359,10 @@ type _ContentReader = Callable[["QuiverInfo"], Awaitable[str]]
 
 
 class _ExtractPipeline:
-    """Bounded-queue async pipeline that writes extracted files to disk.
+    """Async pipeline that writes extracted files to disk.
 
-    File writing is fully asynchronous via `aiofile`.
+    File writing is fully asynchronous via `aiofile`, and entries are
+    partitioned evenly across a bounded number of workers.
 
     Args:
         entries: List of archive members to extract.
@@ -452,55 +402,33 @@ class _ExtractPipeline:
         asyncio.run(self.run_async())
 
     async def _run_async(self) -> None:
-        """Feed entries into a bounded queue and run concurrent writer workers."""
+        """Partition entries and run concurrent writer workers."""
         worker_count = min(MAX_DIRECTORY_READERS, len(self._entries))
-        work_queue: asyncio.Queue[QuiverInfo | None] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
-
-        producer_task = asyncio.create_task(self._producer(work_queue, worker_count))
+        chunks = [self._entries[i::worker_count] for i in range(worker_count)]
         worker_tasks = [
-            asyncio.create_task(self._writer_worker(work_queue)) for _ in range(worker_count)
+            asyncio.create_task(self._writer_worker(chunk)) for chunk in chunks if chunk
         ]
 
         try:
-            await asyncio.gather(producer_task, *worker_tasks)
+            await asyncio.gather(*worker_tasks)
         except Exception:
-            producer_task.cancel()
             for task in worker_tasks:
                 task.cancel()
-            await asyncio.gather(producer_task, *worker_tasks, return_exceptions=True)
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
             raise
 
-    async def _producer(
-        self,
-        work_queue: asyncio.Queue[QuiverInfo | None],
-        worker_count: int,
-    ) -> None:
-        """Feed all entries into *work_queue*, then send sentinel values."""
-        for entry in self._entries:
-            await work_queue.put(entry)
-        for _ in range(worker_count):
-            await work_queue.put(None)
-
-    async def _writer_worker(
-        self,
-        work_queue: asyncio.Queue[QuiverInfo | None],
-    ) -> None:
-        """Consume entries from *work_queue* and write each to disk."""
-        while True:
-            item = await work_queue.get()
-            if item is None:
-                return
-            info = item
+    async def _writer_worker(self, entries: list[QuiverInfo]) -> None:
+        """Write each entry in *entries* to disk."""
+        for info in entries:
             content = await self._content_reader(info)
             target = _validate_extraction_path(info.name, self._destination)
             await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
             async with async_open(target, "w", encoding="utf-8") as afp:
                 await afp.write(content)
-            size_bytes = len(content.encode("utf-8"))
             logger.debug(
                 "Extracted file",
                 entry_path=info.name,
-                size=size_bytes,
+                size=info.length,
             )
 
 
@@ -606,8 +534,7 @@ class QuiverFile:
         self._closed = False
         self._preamble: str | None = preamble
         self._epilogue: str | None = epilogue
-        self._archive_path: Path | None = None
-        self._async_reader: _AsyncArchiveContentReader | None = None
+        self._raw_bytes: memoryview | None = None
         logger.debug("QuiverFile opened", archive_name=name, mode=mode)
 
         if mode == "r":
@@ -615,10 +542,10 @@ class QuiverFile:
             if not archive_path.exists():
                 raise FileNotFoundError(f"Archive not found: {name!r}")
             t0 = time.perf_counter()
-            raw_entries, parsed_preamble, parsed_epilogue = _parse_archive(name)
+            raw_entries, parsed_preamble, parsed_epilogue, raw_buffer = _parse_archive(name)
             self._preamble = parsed_preamble if parsed_preamble.strip() else None
             self._epilogue = parsed_epilogue if parsed_epilogue.strip() else None
-            self._archive_path = archive_path
+            self._raw_bytes = raw_buffer
             for stored_path, payload_length, byte_offset in raw_entries:
                 info = QuiverInfo(
                     name=stored_path,
@@ -778,23 +705,9 @@ class QuiverFile:
         _validate_xml_compatible(content, arcname)
 
         stored_path = _normalize_stored_path(arcname)
-        info = QuiverInfo(name=stored_path, length=len(content.encode("utf-8")))
+        info = QuiverInfo(name=stored_path, length=0)
         self._cache_entry(info, content)
         logger.debug("Added data", entry_path=stored_path, length_bytes=info.length)
-
-    def add_text(self, arcname: str, content: str) -> None:
-        """Backward-compatible alias for `writestr`.
-
-        Args:
-            arcname: Stored path for the archive member.
-            content: UTF-8 text to store.
-        """
-        warnings.warn(
-            "QuiverFile.add_text() is deprecated; use QuiverFile.writestr() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.writestr(arcname, content)
 
     # ------------------------------------------------------------------
     # Read API
@@ -849,11 +762,10 @@ class QuiverFile:
             except ValueError as exc:  # pragma: no cover - defensive
                 raise KeyError(target.name) from exc
 
-        if target._offset is None or self._archive_path is None:
+        if target._offset is None or self._raw_bytes is None:
             raise KeyError(target.name)
 
-        content = _read_content_at(self._archive_path, target._offset, target.length)
-        return content
+        return _read_content_from_buffer(self._raw_bytes, target._offset, target.length)
 
     def __iter__(self) -> Iterator[QuiverInfo]:
         """Iterate over archive members, yielding [QuiverInfo][] objects.
@@ -919,19 +831,7 @@ class QuiverFile:
             content_reader=self._read_member_async,
         )
 
-        async def _execute_pipeline() -> None:
-            if self._archive_path is None:
-                await pipeline.run_async()
-                return
-            previous_reader = self._async_reader
-            async with _AsyncArchiveContentReader(self._archive_path) as reader:
-                self._async_reader = reader
-                try:
-                    await pipeline.run_async()
-                finally:
-                    self._async_reader = previous_reader
-
-        asyncio.run(_execute_pipeline())
+        asyncio.run(pipeline.run_async())
         self._write_surrounding_text(destination)
 
     async def _read_member_async(self, info: QuiverInfo) -> str:
@@ -944,13 +844,10 @@ class QuiverFile:
         if self._mode == "w":
             return await asyncio.to_thread(self._get_entry_content, info.name)
 
-        if info._offset is None or self._archive_path is None:
+        if info._offset is None or self._raw_bytes is None:
             raise KeyError(info.name)
 
-        if self._async_reader is not None:
-            return await self._async_reader.read(info._offset, info.length)
-
-        return await _read_content_at_async(self._archive_path, info._offset, info.length)
+        return _read_content_from_buffer(self._raw_bytes, info._offset, info.length)
 
     def _write_surrounding_text(self, destination: Path) -> None:
         """Write `PREAMBLE` and `EPILOGUE` files to *destination* if present.
@@ -1053,23 +950,15 @@ class QuiverFile:
 
             for info in sorted_infos:
                 content = self._get_entry_content(info.name)
-                fp.write(f'  <file path="{info.name}">\n')
-                fp.write("    <content><![CDATA[")
-                fp.write(_escape_cdata(content))
-                fp.write("]]></content>\n")
-                fp.write("  </file>\n")
+                escaped = _escape_cdata(content)
+                fp.write(
+                    f'  <file path="{info.name}">\n'
+                    f"    <content><![CDATA[{escaped}]]></content>\n"
+                    "  </file>\n"
+                )
 
             fp.write("</archive>\n")
 
             if self._epilogue:
                 fp.write(_EPILOGUE_SENTINEL)
                 fp.write(self._epilogue)
-
-    def _entries_for_serialization(self) -> list[tuple[QuiverInfo, str]]:
-        entries: list[tuple[QuiverInfo, str]] = []
-        for info in self._members:
-            content = self._content_cache.get(info.name)
-            if content is None:
-                raise ValueError(f"Cannot serialize entry without cached content: {info.name}")
-            entries.append((info, content))
-        return entries

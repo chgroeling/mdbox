@@ -8,7 +8,6 @@ import pytest
 from lxml import etree
 
 import quiver
-import quiver.archive as archive_module
 from quiver.archive import BinaryFileError, QuiverFile, QuiverInfo
 
 if TYPE_CHECKING:
@@ -486,10 +485,8 @@ def test_extractall_in_write_mode_raises(tmp_path: Path) -> None:
         qf.extractall()
 
 
-def test_extractall_reads_content_via_async_reader(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """extractall() streams archive content through the async reader."""
+def test_extractall_uses_cached_archive_bytes(tmp_path: Path) -> None:
+    """extractall() relies on cached archive bytes rather than re-reading disk."""
 
     src = tmp_path / "src"
     src.mkdir()
@@ -500,21 +497,13 @@ def test_extractall_reads_content_via_async_reader(
     with QuiverFile.open(str(archive), mode="w") as qf:
         qf.write(str(src))
 
-    call_count = 0
-    original_async_read = archive_module._AsyncArchiveContentReader.read
-
-    async def tracking_async_read(self, offset: int, length: int) -> str:  # type: ignore[override]
-        nonlocal call_count
-        call_count += 1
-        return await original_async_read(self, offset, length)
-
-    monkeypatch.setattr(archive_module._AsyncArchiveContentReader, "read", tracking_async_read)
-
     dest = tmp_path / "out"
     with QuiverFile.open(str(archive), mode="r") as qf:
+        archive.write_text("corrupted", encoding="utf-8")
         qf.extractall(path=str(dest))
 
-    assert call_count == 2
+    assert (dest / "src" / "a.txt").read_text(encoding="utf-8") == "alpha"
+    assert (dest / "src" / "b.txt").read_text(encoding="utf-8") == "beta"
 
 
 # ---------------------------------------------------------------------------
@@ -953,17 +942,6 @@ def test_writestr_rejects_xml_incompatible_content(tmp_path: Path) -> None:
         pytest.raises(BinaryFileError, match=r"\\x00"),
     ):
         qf.writestr("notes.txt", "hello\x00world")
-
-
-def test_add_text_alias_emits_deprecation_warning(tmp_path: Path) -> None:
-    """add_text() remains available as a deprecated alias for writestr()."""
-    archive = tmp_path / "archive.xml"
-    with pytest.deprecated_call():
-        with QuiverFile.open(str(archive), mode="w") as qf:
-            qf.add_text("legacy.txt", "legacy")
-
-    with QuiverFile.open(str(archive), mode="r") as qf:
-        assert qf.read("legacy.txt") == "legacy"
 
 
 # ---------------------------------------------------------------------------
