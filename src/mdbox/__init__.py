@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from typing import IO
 
 from mdbox.archive import BinaryFileError, MdboxFile, MdboxInfo, PathTraversalError
 
-__version__ = version("mdbox")
+try:
+    __version__ = version("mdbox")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
 __all__ = [
     "__version__",
     "open",
