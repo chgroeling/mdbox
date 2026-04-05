@@ -26,21 +26,21 @@ def _expand_bundled_flags(args: list[str]) -> list[str]:
     length = len(args)
 
     while index < length:
-        token = args[index]
+        arg = args[index]
 
-        if token == "--":
-            expanded.append(token)
+        if arg == "--":
+            expanded.append(arg)
             expanded.extend(args[index + 1 :])
             break
 
-        if not token.startswith("-") or token == "-" or token.startswith("--"):
-            expanded.append(token)
+        if not arg.startswith("-") or arg == "-" or arg.startswith("--"):
+            expanded.append(arg)
             index += 1
             continue
 
-        bundle = token[1:]
+        bundle = arg[1:]
         if not bundle:
-            expanded.append(token)
+            expanded.append(arg)
             index += 1
             continue
 
@@ -50,16 +50,14 @@ def _expand_bundled_flags(args: list[str]) -> list[str]:
         if "f" in bundle:
             if bundle[-1] != "f":
                 raise click.UsageError("Option '-f' must be the last flag in a bundle.")
-            for flag in bundle[:-1]:
-                expanded.append(f"-{flag}")
+            expanded.extend(f"-{flag}" for flag in bundle[:-1])
             expanded.append("-f")
             index += 1
             if index >= length:
                 raise click.UsageError("Option '-f' requires an argument.")
             expanded.append(args[index])
         else:
-            for flag in bundle:
-                expanded.append(f"-{flag}")
+            expanded.extend(f"-{flag}" for flag in bundle)
 
         index += 1
 

@@ -165,9 +165,11 @@ def test_add_binary_file_raises(tmp_path: Path) -> None:
     binary.write_bytes(b"\xff\xfe\x00\x01")
     archive_path = tmp_path / "archive.xml"
 
-    with pytest.raises(BinaryFileError, match="UTF-8"):
-        with MdboxFile.open(str(archive_path), mode="w") as qf:
-            qf.write(str(binary))
+    with (
+        pytest.raises(BinaryFileError, match="UTF-8"),
+        MdboxFile.open(str(archive_path), mode="w") as qf,
+    ):
+        qf.write(str(binary))
 
 
 def test_write_defers_file_readstr_until_close(tmp_path: Path) -> None:
@@ -207,9 +209,11 @@ def test_add_file_with_null_byte_raises(tmp_path: Path) -> None:
     bad.write_bytes(b"hello\x00world")
     archive_path = tmp_path / "archive.xml"
 
-    with pytest.raises(BinaryFileError, match=r"\\x00"):
-        with MdboxFile.open(str(archive_path), mode="w") as qf:
-            qf.write(str(bad))
+    with (
+        pytest.raises(BinaryFileError, match=r"\\x00"),
+        MdboxFile.open(str(archive_path), mode="w") as qf,
+    ):
+        qf.write(str(bad))
 
 
 def test_add_file_with_control_char_raises(tmp_path: Path) -> None:
@@ -218,9 +222,11 @@ def test_add_file_with_control_char_raises(tmp_path: Path) -> None:
     bad.write_bytes(b"line one\nline two\x07bell")
     archive_path = tmp_path / "archive.xml"
 
-    with pytest.raises(BinaryFileError, match=r"\\x07"):
-        with MdboxFile.open(str(archive_path), mode="w") as qf:
-            qf.write(str(bad))
+    with (
+        pytest.raises(BinaryFileError, match=r"\\x07"),
+        MdboxFile.open(str(archive_path), mode="w") as qf,
+    ):
+        qf.write(str(bad))
 
 
 def test_xml_control_char_error_contains_file_path(tmp_path: Path) -> None:
@@ -229,9 +235,11 @@ def test_xml_control_char_error_contains_file_path(tmp_path: Path) -> None:
     bad.write_bytes(b"bad\x01byte")
     archive_path = tmp_path / "archive.xml"
 
-    with pytest.raises(BinaryFileError) as exc_info:
-        with MdboxFile.open(str(archive_path), mode="w") as qf:
-            qf.write(str(bad))
+    with (
+        pytest.raises(BinaryFileError) as exc_info,
+        MdboxFile.open(str(archive_path), mode="w") as qf,
+    ):
+        qf.write(str(bad))
 
     assert "offender.txt" in str(exc_info.value)
 
@@ -243,9 +251,11 @@ def test_xml_control_char_error_contains_line_and_col(tmp_path: Path) -> None:
     bad.write_bytes(b"first\nsec\x1fond")
     archive_path = tmp_path / "archive.xml"
 
-    with pytest.raises(BinaryFileError) as exc_info:
-        with MdboxFile.open(str(archive_path), mode="w") as qf:
-            qf.write(str(bad))
+    with (
+        pytest.raises(BinaryFileError) as exc_info,
+        MdboxFile.open(str(archive_path), mode="w") as qf,
+    ):
+        qf.write(str(bad))
 
     msg = str(exc_info.value)
     assert "line 2" in msg
@@ -260,9 +270,11 @@ def test_xml_control_char_error_multiple_occurrences(tmp_path: Path) -> None:
     bad.write_bytes(b"\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c")
     archive_path = tmp_path / "archive.xml"
 
-    with pytest.raises(BinaryFileError) as exc_info:
-        with MdboxFile.open(str(archive_path), mode="w") as qf:
-            qf.write(str(bad))
+    with (
+        pytest.raises(BinaryFileError) as exc_info,
+        MdboxFile.open(str(archive_path), mode="w") as qf,
+    ):
+        qf.write(str(bad))
 
     msg = str(exc_info.value)
     # Should have at most 5 "line N, col M" entries.
@@ -279,9 +291,11 @@ def test_add_directory_with_control_char_file_raises(tmp_path: Path) -> None:
     bad.write_bytes(b"text\x0bvt")
     archive_path = tmp_path / "archive.xml"
 
-    with pytest.raises(BinaryFileError, match=r"\\x0b"):
-        with MdboxFile.open(str(archive_path), mode="w") as qf:
-            qf.write(str(project))
+    with (
+        pytest.raises(BinaryFileError, match=r"\\x0b"),
+        MdboxFile.open(str(archive_path), mode="w") as qf,
+    ):
+        qf.write(str(project))
 
 
 def test_add_directory_recursively_packs_files(tmp_path: Path) -> None:
@@ -1068,7 +1082,7 @@ def test_iter_in_write_mode(tmp_path: Path) -> None:
     assert names == ["a.txt"]
 
 
-def test_fileobj_write_mode_produces_valid_xml(tmp_path: Path) -> None:
+def test_fileobj_write_mode_produces_valid_xml() -> None:
     """Writing to BytesIO produces valid XML when converted to string."""
     import io
 
@@ -1086,7 +1100,7 @@ def test_fileobj_write_mode_produces_valid_xml(tmp_path: Path) -> None:
     assert "nested content" in xml_str
 
 
-def test_fileobj_read_mode_parses_bytesio(tmp_path: Path) -> None:
+def test_fileobj_read_mode_parses_bytesio() -> None:
     """Reading from a BytesIO works correctly."""
     import io
 
@@ -1126,7 +1140,7 @@ def test_read_in_write_mode_returns_bytes(tmp_path: Path) -> None:
         assert result == b"hello"
 
 
-def test_fileobj_roundtrip_write_then_read(tmp_path: Path) -> None:
+def test_fileobj_roundtrip_write_then_read() -> None:
     """Full roundtrip: write to BytesIO, rewind, read back."""
     import io
 
@@ -1144,7 +1158,7 @@ def test_fileobj_roundtrip_write_then_read(tmp_path: Path) -> None:
         assert qf.readstr("b.txt") == "beta"
 
 
-def test_fileobj_with_preamble_epilogue_and_multiple_files(tmp_path: Path) -> None:
+def test_fileobj_with_preamble_epilogue_and_multiple_files() -> None:
     """Create archive in BytesIO with preamble, epilogue, and 3 files; read back and verify."""
     import io
 
@@ -1170,7 +1184,7 @@ def test_fileobj_with_preamble_epilogue_and_multiple_files(tmp_path: Path) -> No
         assert qf.readstr("subdir/file3.txt") == "content three"
 
 
-def test_fileobj_read_within_write_context(tmp_path: Path) -> None:
+def test_fileobj_read_within_write_context() -> None:
     """Read entries while still in write mode before closing."""
     import io
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import itertools
-import random
 import string
 from typing import TYPE_CHECKING
 
@@ -24,10 +23,12 @@ def _build_random_project(root: Path, files: int, seed: int) -> Path:
     project = root / "project"
     project.mkdir()
     alphabet = string.ascii_letters + string.digits + " "
-    rng = random.Random(seed)
     for idx in range(files):
         path = project / f"file_{idx:03d}.txt"
-        content = "".join(rng.choice(alphabet) for _ in range(4096))
+        start = (seed + idx) % len(alphabet)
+        content = "".join(
+            itertools.islice(itertools.cycle(alphabet[start:] + alphabet[:start]), 4096)
+        )
         path.write_text(content, encoding="utf-8")
     return project
 
